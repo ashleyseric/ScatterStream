@@ -137,7 +137,8 @@ namespace AshleySeric.ScatterStream
                     switch (stream.renderingMode)
                     {
                         case RenderingMode.DrawMeshInstanced:
-                            SpawnScatterItemInstanceRendering(mouseHit.point, rotation, scale, presetIndex, stream, Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix), tileWidth);
+                            var tileCoords = SpawnScatterItemInstanceRendering(mouseHit.point, rotation, scale, presetIndex, stream, Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix), tileWidth);
+                            stream.OnTileModified?.Invoke(tileCoords);
                             break;
                         case RenderingMode.Entities:
                             var positions = new NativeHashSet<float3>(1, Allocator.Persistent) { mouseHit.point };
@@ -237,6 +238,7 @@ namespace AshleySeric.ScatterStream
 
                             if (anyDeleted)
                             {
+                                stream.OnTileModified?.Invoke(tileKvp.Value.coords);
                                 stream.dirtyInstancedRenderingTiles.Add(tileKvp.Value.coords);
                                 stream.areInstancedRenderingSortedBuffersDirty = true;
                             }
@@ -321,6 +323,7 @@ namespace AshleySeric.ScatterStream
                     var rotations = new NativeArray<quaternion>(positionCount, Allocator.Persistent);
                     var scales = new NativeArray<float3>(positionCount, Allocator.Persistent);
                     var scaleMultiplier = stream.presets.Presets[selectedPresetIndex].scaleMultiplier;
+                    var changedTiles = new HashSet<TileCoords>();
 
                     // Do the expensive transform work in a job.
                     Dependency = Job.WithCode(() =>
@@ -357,9 +360,18 @@ namespace AshleySeric.ScatterStream
                     // Do the actual spawning back outside of the job.
                     for (int i = 0; i < positionCount; i++)
                     {
-                        SpawnScatterItemInstanceRendering(positions[i], rotations[i], scales[i], selPresetIndex, stream, streamToWorldMatrix_Inverse, tileWidth);
+                        changedTiles.Add(SpawnScatterItemInstanceRendering(positions[i], rotations[i], scales[i], selPresetIndex, stream, streamToWorldMatrix_Inverse, tileWidth));
                     }
 
+                    if (stream.OnTileModified != null)
+                    {
+                        foreach (var tileCoords in changedTiles)
+                        {
+                            stream.OnTileModified(tileCoords);
+                        }
+                    }
+
+                    changedTiles.Clear();
                     positions.Dispose();
                     rotations.Dispose();
                     scales.Dispose();
@@ -528,7 +540,7 @@ namespace AshleySeric.ScatterStream
         /// <param name="presetIndex"></param>
         /// <param name="stream"></param>
         /// <param name="commandBuffer"></param>
-        private static void SpawnScatterItemInstanceRendering(float3 pos,
+        private static TileCoords SpawnScatterItemInstanceRendering(float3 pos,
                                       quaternion rot,
                                       float3 scale,
                                       int presetIndex,
@@ -536,8 +548,9 @@ namespace AshleySeric.ScatterStream
                                       float4x4 streamToWorldMatrix_Inverse,
                                       float tileWidth)
         {
+            var itemMatrixLocalToStream = (Matrix4x4)streamToWorldMatrix_Inverse * Matrix4x4.TRS(pos, rot, scale);
             // TODO: Find out why the loaded tiles aren't going here.
-            var tileCoords = Tile.GetGridTileIndex(pos, tileWidth);
+            var tileCoords = Tile.GetGridTileIndex(itemMatrixLocalToStream.GetPosition(), tileWidth);
             Tile_InstancedRendering tile = default;
 
             if (!stream.LoadedInstanceRenderingTiles.ContainsKey(tileCoords))
@@ -564,10 +577,11 @@ namespace AshleySeric.ScatterStream
                 tile.instances.Add(new List<Matrix4x4>());
             }
 
-            stream.LoadedInstanceRenderingTiles[tileCoords].instances[presetIndex].Add((Matrix4x4)streamToWorldMatrix_Inverse * Matrix4x4.TRS(pos, rot, scale));
+            stream.LoadedInstanceRenderingTiles[tileCoords].instances[presetIndex].Add(itemMatrixLocalToStream);
             tile.instances[presetIndex].Add((Matrix4x4)streamToWorldMatrix_Inverse * Matrix4x4.TRS(pos, rot, scale));
             stream.dirtyInstancedRenderingTiles.Add(tileCoords);
             stream.areInstancedRenderingSortedBuffersDirty = true;
+            return tile.coords;
         }
 
         private static void SpawnScatterItemECS(float3 pos,

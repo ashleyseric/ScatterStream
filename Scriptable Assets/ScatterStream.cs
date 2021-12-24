@@ -32,6 +32,8 @@ namespace AshleySeric.ScatterStream
         public StreamPathingMode pathingMode = StreamPathingMode.DocumentsSubDirectory;
         public string cacheDirectoryPath = "ScatterStream/Cache";
 
+        public Action<TileCoords> OnTileModified = null;
+
         #region Utility Events/Funcs
 
         /// <summary>
