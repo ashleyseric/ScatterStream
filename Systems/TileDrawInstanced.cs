@@ -83,8 +83,9 @@ namespace AshleySeric.ScatterStream
         {
             foreach (var streamKvp in ScatterStream.ActiveStreams)
             {
-                if (streamKvp.Value.isRenderBufferReadyForSwap)
+                if (streamKvp.Value.isRenderBufferReadyForSwap && streamKvp.Value.contentModificationOwner == null)
                 {
+                    streamKvp.Value.contentModificationOwner = this;
                     foreach (var tileKvp in streamKvp.Value.LoadedInstanceRenderingTiles)
                     {
                         var tile = tileKvp.Value;
@@ -92,6 +93,7 @@ namespace AshleySeric.ScatterStream
                         tile.lodSortedInstances = new List<List<List<Matrix4x4>>>();
                     }
                     streamKvp.Value.isRenderBufferReadyForSwap = false;
+                    streamKvp.Value.contentModificationOwner = null;
                 }
             }
         }
@@ -345,7 +347,6 @@ namespace AshleySeric.ScatterStream
 
             return inView;
         }
-
 
         /// <summary>
         /// Render instances in batches by LOD level.

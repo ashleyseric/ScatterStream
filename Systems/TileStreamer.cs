@@ -67,7 +67,12 @@ namespace AshleySeric.ScatterStream
                 }
             }
 
-            ProcessDirtyTiles(stream);
+            if (stream.contentModificationOwner == null)
+            {
+                stream.contentModificationOwner = this;
+                ProcessDirtyTiles(stream);
+                stream.contentModificationOwner = null;
+            }
 
             switch (stream.renderingMode)
             {
@@ -86,15 +91,20 @@ namespace AshleySeric.ScatterStream
                     break;
             }
 
-            // Load tile's in range if they haven't been already.
-            if (!stream.isRunningStreamingTasks)
+            if (stream.contentModificationOwner == null)
             {
-                var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
-                if (Vector3.Distance(cameraPositionLocalToStream, stream.localCameraPositionAtLastStream) > stream.streamingCameraMovementThreshold)
+                stream.contentModificationOwner = this;
+                // Load tile's in range if they haven't been already.
+                if (!stream.isRunningStreamingTasks)
                 {
-                    RunStreamingTasks(stream, cameraPositionLocalToStream);
-                    stream.localCameraPositionAtLastStream = cameraPositionLocalToStream;
+                    var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
+                    if (Vector3.Distance(cameraPositionLocalToStream, stream.localCameraPositionAtLastStream) > stream.streamingCameraMovementThreshold)
+                    {
+                        RunStreamingTasks(stream, cameraPositionLocalToStream);
+                        stream.localCameraPositionAtLastStream = cameraPositionLocalToStream;
+                    }
                 }
+                stream.contentModificationOwner = null;
             }
         }
 
@@ -450,6 +460,7 @@ namespace AshleySeric.ScatterStream
                 {
                     case RenderingMode.DrawMeshInstanced:
                         // Save dirty tiles to disk.
+                        var tileCoordsToRemove = new HashSet<TileCoords>();
                         foreach (var tileCoords in stream.dirtyInstancedRenderingTiles)
                         {
                             if (!stream.tilesBeingStreamedIn.Contains(tileCoords))
@@ -459,9 +470,16 @@ namespace AshleySeric.ScatterStream
                                 tile.RenderBounds = Tile.GetTileBounds_LocalToStream(tile.instances, stream);
                                 // Save this tile to disk.
                                 SaveTileToDisk(default, stream, tileCoords);
+                                tileCoordsToRemove.Add(tileCoords);
                             }
                         }
-                        stream.dirtyInstancedRenderingTiles.Clear();
+
+                        // Remove processed tiles outside the foreach.
+                        foreach (var tileCoords in tileCoordsToRemove)
+                        {
+                            stream.dirtyInstancedRenderingTiles.Remove(tileCoords);
+                        }
+                        tileCoordsToRemove.Clear();
                         break;
                     case RenderingMode.Entities:
                         var streamGuid = stream.id;
@@ -485,7 +503,7 @@ namespace AshleySeric.ScatterStream
             }
             catch (Exception e)
             {
-                Debug.LogError($"Something wen't wrong attempting to process dirty tile. {e}");
+                Debug.LogError($"Something went wrong attempting to process dirty tile. {e}");
             }
         }
 

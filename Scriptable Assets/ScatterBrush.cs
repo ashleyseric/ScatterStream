@@ -24,5 +24,7 @@ namespace AshleySeric.ScatterStream
         public float noiseScale = 2f;
         public bool conformBrushToSurface = false;
         public bool randomiseYRotation = true;
+        public StrokeProcessingType strokeType = StrokeProcessingType.Immediate;
+        public int maxDeferredStrokesBeforeProcessingDirty = 3;
     }
 }
