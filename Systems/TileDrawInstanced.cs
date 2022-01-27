@@ -33,15 +33,7 @@ namespace AshleySeric.ScatterStream
 
         protected override void OnUpdate()
         {
-            foreach (var streamKvp in ScatterStream.ActiveStreams)
-            {
-                if (streamKvp.Value.isRenderBufferReadyForSwap)
-                {
-                    // Swap ready buffers on each stream from completed sorting tasks.
-                    SwapTileRenderBuffers();
-                    break;
-                }
-            }
+            SwapTileRenderBuffersIfReady();
 
             foreach (var streamKvp in ScatterStream.ActiveStreams)
             {
@@ -79,7 +71,7 @@ namespace AshleySeric.ScatterStream
         /// <summary>
         /// Swap results of sorting tasks from tile.lodSortedInstances into tile.lodSortedInstancesRenderBuffer for rendering.
         /// </summary>
-        private void SwapTileRenderBuffers()
+        private void SwapTileRenderBuffersIfReady()
         {
             foreach (var streamKvp in ScatterStream.ActiveStreams)
             {
