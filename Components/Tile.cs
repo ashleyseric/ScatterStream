@@ -54,7 +54,7 @@ namespace AshleySeric.ScatterStream
             return new AABB
             {
                 Center = GetTilePosition(coords, tileWidth, halfTileWidth),
-                Extents = new float3(halfTileWidth, math.INFINITY, halfTileWidth)
+                Extents = new float3(halfTileWidth, 10000, halfTileWidth)
             };
         }
 
@@ -214,8 +214,7 @@ namespace AshleySeric.ScatterStream
             // Use the closest point on the bounds as our min distance.
             // We can't use corner point checks for this as it'll be incorrect when
             // we're sitting right over/within the bounds.
-            var aabb = (AABB)tileBounds;
-            res.x = math.distancesq(new Bounds(aabb.Center, aabb.Size).ClosestPoint((Vector3)position), (float3)position);
+            res.x = math.distancesq(new Bounds(tileBounds.Center, tileBounds.Size).ClosestPoint((Vector3)position), (float3)position);
 
             return res;
         }
