@@ -6,6 +6,7 @@ using Cysharp.Threading.Tasks;
 using Unity.Entities;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace AshleySeric.ScatterStream
 {
@@ -378,19 +379,19 @@ namespace AshleySeric.ScatterStream
                         // Render these instances with each mesh/material combo.
                         foreach (var renderable in renderables)
                         {
-                            RenderWithDrawMeshInstanced(instanceBuffer, renderable.mesh, renderable.materials);
+                            RenderWithDrawMeshInstanced(instanceBuffer, renderable);
                         }
                     }
                 }
             }
         }
 
-        public void RenderWithDrawMeshInstanced(in List<Matrix4x4> instances, in Mesh mesh, in Material[] materials)
+        public void RenderWithDrawMeshInstanced(in List<Matrix4x4> instances, ScatterRenderable renderable)
         {
             int indexInFinalBuffer = 0;
             int instanceIndex = 0;
             int instanceCount = instances.Count;
-            int materialCount = materials.Length;
+            int materialCount = renderable.materials.Length;
 
             // Render all instances in batches of 1023 (limitation of Graphics.DrawMeshInstanced).
             while (instanceIndex < instanceCount)
@@ -404,7 +405,15 @@ namespace AshleySeric.ScatterStream
 
                 for (int j = 0; j < materialCount; j++)
                 {
-                    Graphics.DrawMeshInstanced(mesh, j, materials[j], finalRenderMatrixBuffer, indexInFinalBuffer);
+                    Graphics.DrawMeshInstanced(mesh: renderable.mesh,
+                                               submeshIndex: j,
+                                               material: renderable.materials[j],
+                                               matrices: finalRenderMatrixBuffer,
+                                               count: indexInFinalBuffer,
+                                               properties: null,
+                                               castShadows: renderable.shadowCastMode,
+                                               receiveShadows: renderable.receiveShadows,
+                                               layer: renderable.layer);
                 }
 
                 indexInFinalBuffer = 0;
