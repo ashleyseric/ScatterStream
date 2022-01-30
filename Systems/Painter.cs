@@ -121,7 +121,7 @@ namespace AshleySeric.ScatterStream
                 {
                     // Give the TileStreamer.ProcessDirtyTiles a chance to sneak in before
                     // we take over modification ownership again.
-                    await UniTask.NextFrame();
+                    await UniTask.NextFrame(PlayerLoopTiming.PostLateUpdate);
                 }
 
                 switch (state.mode)
