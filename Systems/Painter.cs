@@ -226,10 +226,11 @@ namespace AshleySeric.ScatterStream
 
             stream.contentModificationOwner = this;
 
+            try
+            {
                 switch (streamRenderingMode)
                 {
                     case RenderingMode.DrawMeshInstanced:
-                    {
                         await Task.Run(() =>
                         {
                             foreach (var tileKvp in stream.LoadedInstanceRenderingTiles)
@@ -259,10 +260,8 @@ namespace AshleySeric.ScatterStream
                                 }
                             }
                         });
-                    }
                         break;
                     case RenderingMode.Entities:
-                    {
                         UpdateTilesOverlappingBrushList(brushState.position, brushRadius, stream);
                         var tiles = tilesOverlappingBrush;
                         var commandBuffer = new EntityCommandBuffer(Allocator.TempJob);
@@ -309,6 +308,10 @@ namespace AshleySeric.ScatterStream
                         commandBuffer.Dispose();
                         break;
                 }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError(e);
             }
 
             stream.contentModificationOwner = null;
