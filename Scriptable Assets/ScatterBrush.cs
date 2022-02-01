@@ -22,6 +22,11 @@ namespace AshleySeric.ScatterStream
         public float strokeSpacing = 0.6f;
         public float2 scaleRange = new float2(0.5f, 1.5f);
         public float noiseScale = 2f;
+        /// <summary>
+        /// Normalised strength of positional noise offset as a factor of spacing.
+        /// </summary>
+        [Tooltip("Normalised strength of positional noise offset as a factor of spacing.")]
+        public float positionNoiseStrength = 0f;
         public bool conformBrushToSurface = false;
         public bool randomiseYRotation = true;
         public StrokeProcessingType strokeType = StrokeProcessingType.Immediate;

@@ -168,25 +168,23 @@ namespace AshleySeric.ScatterStream
             switch (stream.renderingMode)
             {
                 case RenderingMode.DrawMeshInstanced:
-                    var tileCoords = SpawnScatterItemInstanceRendering(placementData.position, placementData.rotation, placementData.scale, placementData.presetIndex, stream, Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix), tileWidth);
+                    var tileCoords = SpawnScatterItemInstanceRendering(float4x4.TRS(placementData.position, placementData.rotation, placementData.scale), placementData.presetIndex, stream, Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix), tileWidth);
                     stream.OnTileModified?.Invoke(tileCoords);
                     break;
                 case RenderingMode.Entities:
-                    var positions = new NativeHashSet<float3>(1, Allocator.Persistent) { placementData.position };
-                    var overlappingTiles = GetOrCreateOverlappingTiles(positions, stream);
-                    positions.Dispose();
+                    var matrix = float4x4.TRS(placementData.position, placementData.rotation, placementData.scale);
+                    var matrices = new NativeHashSet<float4x4>(1, Allocator.Persistent) { matrix };
+                    var overlappingTiles = GetOrCreateOverlappingTiles(matrices, stream);
                     var buffer = new EntityCommandBuffer(Allocator.Persistent);
-                    var position = placementData.position;
-                    var rotation = placementData.rotation;
-                    var scale = placementData.scale;
                     var presetIndex = placementData.presetIndex;
 
                     // Place single item at hit point.
                     Dependency = Job.WithCode(() =>
                     {
-                        SpawnScatterItemECS(position, rotation, scale, overlappingTiles, presetIndex, prefabEntity, streamGuid, tileWidth, buffer);
+                        SpawnScatterItemECS(matrix, overlappingTiles, presetIndex, prefabEntity, streamGuid, tileWidth, buffer);
                     }).Schedule(Dependency);
                     Dependency.Complete();
+                    matrices.Dispose();
 
                     buffer.Playback(EntityManager);
                     buffer.Dispose();
@@ -225,12 +223,12 @@ namespace AshleySeric.ScatterStream
                 // Wait for anyone else to complete modifying the contents within this stream first.
                 await UniTask.WaitUntil(() => stream.contentModificationOwner == null);
             }
-            
+
             stream.contentModificationOwner = this;
 
-            switch (streamRenderingMode)
-            {
-                case RenderingMode.DrawMeshInstanced:
+                switch (streamRenderingMode)
+                {
+                    case RenderingMode.DrawMeshInstanced:
                     {
                         await Task.Run(() =>
                         {
@@ -262,8 +260,8 @@ namespace AshleySeric.ScatterStream
                             }
                         });
                     }
-                    break;
-                case RenderingMode.Entities:
+                        break;
+                    case RenderingMode.Entities:
                     {
                         UpdateTilesOverlappingBrushList(brushState.position, brushRadius, stream);
                         var tiles = tilesOverlappingBrush;
@@ -310,7 +308,7 @@ namespace AshleySeric.ScatterStream
                         commandBuffer.Playback(EntityManager);
                         commandBuffer.Dispose();
                         break;
-                    }
+                }
             }
 
             stream.contentModificationOwner = null;
@@ -320,12 +318,8 @@ namespace AshleySeric.ScatterStream
         private async Task ProcessBrush_Add(BrushPlacementData brushState, ScatterStream stream)
         {
             Profiler.BeginSample("ScatterStream.Painter.ProcessBrush_Add (pre async)");
-            var positionsToPlace = GetBrushPositions(
-                brushState.diameter,
-                stream.brushConfig.spacing,
-                stream.brushConfig.noiseScale,
-                stream.brushConfig.layerMask,
-                brushState);
+            var rotationOffset = stream.presets.Presets[brushState.presetIndex].rotationOffset.value;
+            var matricesToPlace = GetBrushPlacementMatrices(stream.brushConfig, brushState.diameter, stream.presets.Presets[brushState.presetIndex].scaleMultiplier, rotationOffset, brushState);
 
             // Capture variables for access in the job.
             var scaleRange = stream.brushConfig.scaleRange;
@@ -334,11 +328,8 @@ namespace AshleySeric.ScatterStream
             var streamGuid = stream.id;
             var tileWidth = stream.tileWidth;
             var entityPrefab = stream.itemPrefabEntities[brushState.presetIndex];
-            var rotationOffset = stream.presets.Presets[brushState.presetIndex].rotationOffset.value;
-            var localUp = new Quaternion(rotationOffset.x, rotationOffset.y, rotationOffset.z, rotationOffset.w) * new Vector3(0, 1, 0);
             var selPresetIndex = brushState.presetIndex;
-            var positionsToPlaceEnumerator = positionsToPlace.GetEnumerator();
-            var randomiseYRotation = stream.brushConfig.randomiseYRotation;
+            var positionsToPlaceEnumerator = matricesToPlace.GetEnumerator();
             var placementRotation = (quaternion)rotationOffset;
             var streamToWorldMatrix_Inverse = Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix);
 
@@ -354,56 +345,11 @@ namespace AshleySeric.ScatterStream
             switch (stream.renderingMode)
             {
                 case RenderingMode.DrawMeshInstanced:
-                    var positionCount = positionsToPlace.Count();
-                    var positions = positionsToPlace.ToNativeArray(Allocator.Persistent);
-                    var rotations = new NativeArray<quaternion>(positionCount, Allocator.Persistent);
-                    var scales = new NativeArray<float3>(positionCount, Allocator.Persistent);
-                    var scaleMultiplier = stream.presets.Presets[brushState.presetIndex].scaleMultiplier;
+                    var positionCount = matricesToPlace.Count();
+                    var matrices = matricesToPlace.ToNativeArray(Allocator.Persistent);
 
                     // End profiling for now as we're about to span multiple async frames.
                     Profiler.EndSample();
-
-                    try
-                    {
-                        // Do the expensive transform work on a thread.
-                        await Task.Run(() =>
-                        {
-                            int index = 0;
-                            while (positionsToPlaceEnumerator.MoveNext())
-                            {
-                                var position = positionsToPlaceEnumerator.Current;
-                                var rot = placementRotation;
-
-                                if (randomiseYRotation)
-                                {
-                                    rot = math.mul(
-                                    rotationOffset,
-                                    quaternion.AxisAngle(
-                                        localUp,
-                                        noise.cnoise(new float2(position.x, position.z)) * 180f)
-                                    );
-                                }
-
-                                positions[index] = position;
-                                rotations[index] = rot;
-                                scales[index] = scaleMultiplier * math.lerp(
-                                    new float3(scaleRange.x, scaleRange.x, scaleRange.x),
-                                    new float3(scaleRange.y, scaleRange.y, scaleRange.y),
-                                    math.abs(noise.cnoise(new float2(position.x / noiseScale, position.z / noiseScale)))
-                                );
-                                index++;
-                            }
-                        });
-                    }
-                    catch (System.Exception e)
-                    {
-                        Debug.LogError(e);
-                        stream.contentModificationOwner = null;
-                        positionsToPlace.Dispose();
-                        positions.Dispose();
-                        rotations.Dispose();
-                        scales.Dispose();
-                    }
 
                     // Begin profiling again now we're finished the async processing.
                     Profiler.BeginSample("ScatterStream.Painter.ProcessBrush_Add (post async)");
@@ -413,7 +359,7 @@ namespace AshleySeric.ScatterStream
                     for (int i = 0; i < positionCount; i++)
                     {
                         //Debug.Log(rotations[i]);
-                        changedTiles.Add(SpawnScatterItemInstanceRendering(positions[i], rotations[i], scales[i], selPresetIndex, stream, streamToWorldMatrix_Inverse, tileWidth));
+                        changedTiles.Add(SpawnScatterItemInstanceRendering(matrices[i], selPresetIndex, stream, streamToWorldMatrix_Inverse, tileWidth));
                     }
 
                     if (stream.OnTileModified != null)
@@ -425,38 +371,16 @@ namespace AshleySeric.ScatterStream
                     }
 
                     changedTiles.Clear();
-                    positions.Dispose();
-                    rotations.Dispose();
-                    scales.Dispose();
-
+                    matrices.Dispose();
                     break;
                 case RenderingMode.Entities:
                     var spawnItemsBuffer = new EntityCommandBuffer(Allocator.TempJob);
-                    var overlappingTiles = GetOrCreateOverlappingTiles(positionsToPlace, stream);
+                    var overlappingTiles = GetOrCreateOverlappingTiles(matricesToPlace, stream);
                     Dependency = Job.WithCode(() =>
                     {
                         while (positionsToPlaceEnumerator.MoveNext())
                         {
-                            var position = positionsToPlaceEnumerator.Current;
-                            var scale = math.lerp(
-                                new float3(scaleRange.x, scaleRange.x, scaleRange.x),
-                                new float3(scaleRange.y, scaleRange.y, scaleRange.y),
-                                math.abs(noise.cnoise(new float2(position.x / noiseScale, position.z / noiseScale)))
-                            );
-                            var rot = placementRotation;
-
-                            if (randomiseYRotation)
-                            {
-                                rot = math.mul(
-                                    rotationOffset,
-                                    quaternion.AxisAngle(
-                                        localUp,
-                                        noise.cnoise(new float2(position.x, position.z)) * 180f
-                                    )
-                                );
-                            }
-
-                            SpawnScatterItemECS(position, rot, scale, overlappingTiles, selPresetIndex, entityPrefab, streamGuid, tileWidth, spawnItemsBuffer);
+                            SpawnScatterItemECS(positionsToPlaceEnumerator.Current, overlappingTiles, selPresetIndex, entityPrefab, streamGuid, tileWidth, spawnItemsBuffer);
                         }
                     }).Schedule(Dependency);
                     sim.AddJobHandleForProducer(Dependency);
@@ -469,27 +393,30 @@ namespace AshleySeric.ScatterStream
             }
 
             stream.contentModificationOwner = null;
-            positionsToPlace.Dispose();
+            matricesToPlace.Dispose();
             Profiler.EndSample();
         }
 
         /// <summary>
         /// Get all valid brush positions as per brush config/position.
         /// </summary>
-        /// <param name="brushConfig"></param>
-        /// <param name="brushState"></param>
-        /// <returns></returns>
-        private NativeHashSet<float3> GetBrushPositions(float diameter, float spacing, float noiseScale, LayerMask layerMask, BrushPlacementData brushState)
+        /// <returns>HashSet of world space placement positions.</returns>
+        private NativeHashSet<float4x4> GetBrushPlacementMatrices(ScatterBrush brush, float diameter, float3 scaleMultiplier, quaternion rotationOffset, BrushPlacementData brushState)
         {
             Profiler.BeginSample("ScatterStream.Painter.GetBrushPositions");
             // Capture variables for access within the job.
+            var localUp = new Quaternion(rotationOffset.value.x, rotationOffset.value.y, rotationOffset.value.z, rotationOffset.value.w) * new Vector3(0, 1, 0);
+            var scaleRange = brush.scaleRange;
             var brushRadius = diameter * 0.5f;
-            var rowCount = (int)math.ceil(diameter / spacing);
+            var spacing = brush.spacing;
+            var layerMask = brush.layerMask;
+            var noiseScale = brush.noiseScale;
+            var rowCount = (int)math.ceil(diameter / brush.spacing);
             var total = rowCount * rowCount;
             var commands = new NativeArray<RaycastCommand>(total, Allocator.TempJob);
             var raycastDir = -(float3)brushState.normal;
             var brushPosition = (float3)brushState.position;
-            var maxOffset = spacing * 0.33f;
+            var maxNoiseOffset = brush.positionNoiseStrength * spacing;
             int maxHits = 20;
 
             // Need to switch to new physics system to use new math library/burst. https://docs.unity3d.com/Packages/com.unity.physics@0.0/manual/collision_queries.html
@@ -500,16 +427,16 @@ namespace AshleySeric.ScatterStream
                     for (int z = 0; z < rowCount; z++)
                     {
                         // Find grid-snapped point closest to this one.
-                        var pos = hitPoint - new float3(hitPoint.x % spacing, hitPoint.y % spacing, hitPoint.z % spacing);
+                        var pos = brushPosition - new float3(brushPosition.x % spacing, 0, brushPosition.z % spacing);
                         // Lift raycast start point up to radius of the brush.
                         pos -= raycastDir * brushRadius;
                         // Find grid position.
                         pos.x -= (float)spacing * x - brushRadius;
                         pos.z -= (float)spacing * z - brushRadius;
-                        // Apply deterministic noise offset.
-                        // TODO: Fix this noise not working.
-                        pos.x += noise.cnoise(new float2(pos.x / noiseScale, pos.y / noiseScale) * maxOffset);
-                        pos.z += noise.cnoise(new float2(pos.z / noiseScale, pos.y / noiseScale) * maxOffset);
+                        // Select a random rotation as a direction vector and multiply that by the offset.
+                        var offsetRot = quaternion.Euler(0, noise.snoise(new float2(pos.x / noiseScale, 0.5f) * 360f), 0);
+                        // Apply deterministic noise offset only using horizontal position.
+                        pos += maxNoiseOffset * math.mul(offsetRot, new float3(1f, 0f, 0f)) * noise.snoise(new float2(pos.z / noiseScale, 0.5f));
                         // Add to raycast command array.
                         commands[(x * rowCount) + z] = new RaycastCommand(pos, raycastDir, Mathf.Infinity, layerMask, maxHits);
                     }
@@ -525,25 +452,50 @@ namespace AshleySeric.ScatterStream
 
             var brushHitPos = (float3)brushState.position;
             var brushRadiusSqr = brushRadius * brushRadius;
-            var positionsToPlace = new NativeHashSet<float3>(raycastHits.Length, Allocator.Persistent);
+            var matricesToPlace = new NativeHashSet<float4x4>(raycastHits.Length, Allocator.Persistent);
 
-            // Discard rays outside brush radius.
-            for (int i = 0; i < raycastHits.Length; i++)
+            Dependency = Job.WithCode(() =>
             {
-                var hit = raycastHits[i];
-
-                if (hit.collider != null && math.distancesq(brushHitPos, hit.point) < brushRadiusSqr)
+                for (int i = 0; i < raycastHits.Length; i++)
                 {
-                    positionsToPlace.Add(hit.point);
+                    var hit = raycastHits[i];
+
+                    // Skip if we didn't hit anything with this ray.
+                    if (hit.distance == 0f)
+                    {
+                        continue;
+                    }
+
+                    // Discard rays outside brush radius.
+                    if (math.distancesq(brushHitPos, hit.point) < brushRadiusSqr)
+                    {
+                        matricesToPlace.Add(
+                            float4x4.TRS(
+                                translation: hit.point,
+                                rotation: math.mul(
+                                    rotationOffset,
+                                    quaternion.AxisAngle(
+                                        localUp,
+                                        noise.cnoise(new float2(hit.point.x / noiseScale, hit.point.z / noiseScale)) * 360)
+                                ),
+                                scale: scaleMultiplier * math.lerp(
+                                    new float3(scaleRange.x, scaleRange.x, scaleRange.x),
+                                    new float3(scaleRange.y, scaleRange.y, scaleRange.y),
+                                    math.abs(noise.cnoise(new float2(hit.point.x / noiseScale, hit.point.z / noiseScale)))
+                                )
+                            )
+                        );
+                    }
                 }
-            }
+            }).Schedule(Dependency);
+            Dependency.Complete();
 
             raycastHits.Dispose();
             Profiler.EndSample();
-            return positionsToPlace;
+            return matricesToPlace;
         }
 
-        private NativeHashMap<TileCoords, Entity> GetOrCreateOverlappingTiles(NativeHashSet<float3> positions, ScatterStream stream)
+        private NativeHashMap<TileCoords, Entity> GetOrCreateOverlappingTiles(NativeHashSet<float4x4> positions, ScatterStream stream)
         {
             var buffer = new EntityCommandBuffer(Allocator.Persistent);
             var tilesToMake = new NativeHashSet<TileCoords>(0, Allocator.Persistent);
@@ -552,7 +504,7 @@ namespace AshleySeric.ScatterStream
 
             foreach (var pos in positions)
             {
-                var coords = Tile.GetGridTileIndex(pos, stream.tileWidth);
+                var coords = Tile.GetGridTileIndex(pos.GetPosition(), stream.tileWidth);
                 tilesToMake.Add(coords);
             }
 
@@ -594,15 +546,13 @@ namespace AshleySeric.ScatterStream
         /// <param name="presetIndex"></param>
         /// <param name="stream"></param>
         /// <param name="commandBuffer"></param>
-        private static TileCoords SpawnScatterItemInstanceRendering(float3 pos,
-                                      quaternion rot,
-                                      float3 scale,
-                                      int presetIndex,
-                                      ScatterStream stream,
-                                      float4x4 streamToWorldMatrix_Inverse,
-                                      float tileWidth)
+        private static TileCoords SpawnScatterItemInstanceRendering(float4x4 matrix,
+                                                                    int presetIndex,
+                                                                    ScatterStream stream,
+                                                                    float4x4 streamToWorldMatrix_Inverse,
+                                                                    float tileWidth)
         {
-            var itemMatrixLocalToStream = math.mul(streamToWorldMatrix_Inverse, float4x4.TRS(pos, rot, scale));
+            var itemMatrixLocalToStream = math.mul(streamToWorldMatrix_Inverse, matrix);
             // TODO: Find out why the loaded tiles aren't going here.
             var tileCoords = Tile.GetGridTileIndex(itemMatrixLocalToStream.GetPosition(), tileWidth);
             Tile_InstancedRendering tile = default;
@@ -632,22 +582,23 @@ namespace AshleySeric.ScatterStream
             }
 
             stream.LoadedInstanceRenderingTiles[tileCoords].instances[presetIndex].Add(itemMatrixLocalToStream);
-            tile.instances[presetIndex].Add((Matrix4x4)streamToWorldMatrix_Inverse * Matrix4x4.TRS(pos, rot, scale));
+            tile.instances[presetIndex].Add((Matrix4x4)(math.mul(streamToWorldMatrix_Inverse, matrix)));
             stream.dirtyInstancedRenderingTiles.Add(tileCoords);
             stream.areInstancedRenderingSortedBuffersDirty = true;
             return tile.coords;
         }
 
-        private static void SpawnScatterItemECS(float3 pos,
-                                      quaternion rot,
-                                      float3 scale,
-                                      NativeHashMap<TileCoords, Entity> overlappingTiles,
-                                      int presetIndex,
-                                      Entity entityPrefab,
-                                      int streamId,
-                                      float tileWidth,
-                                      EntityCommandBuffer commandBuffer)
+        private static void SpawnScatterItemECS(float4x4 matrix,
+                                                NativeHashMap<TileCoords, Entity> overlappingTiles,
+                                                int presetIndex,
+                                                Entity entityPrefab,
+                                                int streamId,
+                                                float tileWidth,
+                                                EntityCommandBuffer commandBuffer)
         {
+            var pos = matrix.GetPosition();
+            var rot = matrix.GetRotation();
+            var scale = matrix.GetScale();
 
             var tileEntity = overlappingTiles[Tile.GetGridTileIndex(pos, tileWidth)];
             // TODO: Randomly select a prefab based on UI settings (weighted chance per-prefab etc).
