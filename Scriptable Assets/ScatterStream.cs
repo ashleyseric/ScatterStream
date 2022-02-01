@@ -32,6 +32,8 @@ namespace AshleySeric.ScatterStream
         public StreamPathingMode pathingMode = StreamPathingMode.DocumentsSubDirectory;
         public string cacheDirectoryPath = "ScatterStream/Cache";
 
+        public Action<TileCoords> OnTileModified = null;
+
         #region Utility Events/Funcs
 
         /// <summary>
@@ -68,6 +70,7 @@ namespace AshleySeric.ScatterStream
         [NonSerialized] public Matrix4x4 previousFrameStreamToWorld;
         [NonSerialized] public List<Entity> itemPrefabEntities = new List<Entity>();
         [NonSerialized] public bool isRunningStreamingTasks = false;
+        [NonSerialized] public volatile object contentModificationOwner = null;
         [NonSerialized] public int totalTilesLoadedThisFrame = 0;
 
         /// <summary>
@@ -217,7 +220,7 @@ namespace AshleySeric.ScatterStream
             tileCoordsInRange.Clear();
 
             // Remove any ECS spawned items for this strema.
-            var streamer = World.DefaultGameObjectInjectionWorld.GetExistingSystem<TileStreamer>();
+            var streamer = World.DefaultGameObjectInjectionWorld?.GetExistingSystem<TileStreamer>();
             if (streamer != null)
             {
                 streamer.UnloadTilesOutOfRange(this);

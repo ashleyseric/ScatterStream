@@ -2352,6 +2352,7 @@ MonoBehaviour:
   parentTransform: {fileID: 0}
   streams: []
   brushCursorPrefab: {fileID: 2658447746701242176, guid: bb6ea2ea0c1b68d46b77bf4ba9bfd41f, type: 3}
+  pendingDeferredStrokeCursorPrefab: {fileID: 2658447746701242176, guid: 7fefd2f7fcc87bf4ab7b30fb666d7bed, type: 3}
   brushDiameterSlider: {fileID: 8708891819846519909}
   brushSpacingSlider: {fileID: 8708891819512291124}
   streamListItemContainer: {fileID: 3751280121403260708}

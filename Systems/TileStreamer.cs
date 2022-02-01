@@ -12,6 +12,7 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using Unity.Transforms;
 using UnityEngine;
+using UnityEngine.Profiling;
 
 namespace AshleySeric.ScatterStream
 {
@@ -59,15 +60,22 @@ namespace AshleySeric.ScatterStream
                 stream.streamToWorld = stream.parentTransform.localToWorldMatrix;
                 stream.streamToWorld_Inverse = stream.streamToWorld.inverse;
 
-                // Transform camera planes into stream space.
-                stream.localCameraFrustum = GeometryUtility.CalculateFrustumPlanes(stream.camera);
+                // Calculate world space frustum planes.
+                GeometryUtility.CalculateFrustumPlanes(stream.camera, stream.localCameraFrustum);
+
+                // Transform each plane into stream space.
                 for (int i = 0; i < stream.localCameraFrustum.Length; i++)
                 {
                     stream.localCameraFrustum[i] = stream.streamToWorld_Inverse.TransformPlane(stream.localCameraFrustum[i]);
                 }
             }
 
-            ProcessDirtyTiles(stream);
+            if (stream.contentModificationOwner == null)
+            {
+                stream.contentModificationOwner = this;
+                ProcessDirtyTiles(stream);
+                stream.contentModificationOwner = null;
+            }
 
             switch (stream.renderingMode)
             {
@@ -86,15 +94,20 @@ namespace AshleySeric.ScatterStream
                     break;
             }
 
-            // Load tile's in range if they haven't been already.
-            if (!stream.isRunningStreamingTasks)
+            if (stream.contentModificationOwner == null)
             {
-                var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
-                if (Vector3.Distance(cameraPositionLocalToStream, stream.localCameraPositionAtLastStream) > stream.streamingCameraMovementThreshold)
+                stream.contentModificationOwner = this;
+                // Load tile's in range if they haven't been already.
+                if (!stream.isRunningStreamingTasks)
                 {
-                    RunStreamingTasks(stream, cameraPositionLocalToStream);
-                    stream.localCameraPositionAtLastStream = cameraPositionLocalToStream;
+                    var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
+                    if (Vector3.Distance(cameraPositionLocalToStream, stream.localCameraPositionAtLastStream) > stream.streamingCameraMovementThreshold)
+                    {
+                        RunStreamingTasks(stream, cameraPositionLocalToStream);
+                        stream.localCameraPositionAtLastStream = cameraPositionLocalToStream;
+                    }
                 }
+                stream.contentModificationOwner = null;
             }
         }
 
@@ -126,19 +139,20 @@ namespace AshleySeric.ScatterStream
                 return;
             }
 
+            Profiler.BeginSample("ScatterStream.TileStreamer.CollectTileCoordsInRange (Async)");
+
             NativeHashSet<TileCoords> results = new NativeHashSet<TileCoords>(1024, Allocator.Persistent);
-            float tileWidth = stream.tileWidth;
-            float halfTileWidth = tileWidth * 0.5f;
-            var cameraPosFlattened = new float2(cameraPositionStreamSpace.x, cameraPositionStreamSpace.z);
 
             // TODO: Move this into jobs.
             await Task.Run(() =>
             {
-                int indexLimit = (int)math.floor(distance / tileWidth);
+                float tileWidth = stream.tileWidth;
+                float halfTileWidth = tileWidth * 0.5f;
+                int indexLimit = (int)math.ceil(distance / tileWidth);
                 float distSqr = distance * distance;
-                var nearestTileCoords = new int2((int)math.floor(cameraPositionStreamSpace.x / tileWidth), (int)math.floor(cameraPositionStreamSpace.z / tileWidth));
+                var cameraPosFlattened = new float2(cameraPositionStreamSpace.x, cameraPositionStreamSpace.z);
+                var nearestTileCoords = new int2((int)math.floor(cameraPosFlattened.x / tileWidth), (int)math.floor(cameraPosFlattened.y / tileWidth));
 
-                // TODO: Apply offset here to be relative to camera position.
                 for (int x = nearestTileCoords.x - indexLimit; x < nearestTileCoords.x + indexLimit; x++)
                 {
                     for (int z = nearestTileCoords.y - indexLimit; z < nearestTileCoords.y + indexLimit; z++)
@@ -147,7 +161,7 @@ namespace AshleySeric.ScatterStream
                         float3 tilePos = Tile.GetTilePosition(coords, tileWidth, halfTileWidth);
 
                         // Ignore tiles outside our radius.
-                        if (math.distancesq(new float2(tilePos.x, tilePos.z), cameraPosFlattened + tileWidth) > distSqr)
+                        if (math.distancesq(new float2(tilePos.x, tilePos.z), cameraPosFlattened) + tileWidth > distSqr)
                         {
                             continue;
                         }
@@ -157,6 +171,7 @@ namespace AshleySeric.ScatterStream
                 }
             });
 
+            Profiler.EndSample();
             onComplete.Invoke(results);
         }
 
@@ -316,6 +331,8 @@ namespace AshleySeric.ScatterStream
 
         private void LoadTilesInRange(ScatterStream stream)
         {
+            Profiler.BeginSample("ScatterStream.TileStreamer.LoadTilesInRange");
+
             switch (stream.renderingMode)
             {
                 case RenderingMode.DrawMeshInstanced:
@@ -376,10 +393,14 @@ namespace AshleySeric.ScatterStream
                 }
                 tilesToRemove.Dispose();
             }).Run();
+
+            Profiler.EndSample();
         }
 
         public void UnloadTilesOutOfRange(ScatterStream stream)
         {
+            Profiler.BeginSample("ScatterStream.TileStreamer.UnloadTilesOutOfRange");
+
             switch (stream.renderingMode)
             {
                 case RenderingMode.DrawMeshInstanced:
@@ -440,16 +461,21 @@ namespace AshleySeric.ScatterStream
                     }
                     break;
             }
+
+            Profiler.EndSample();
         }
 
         private void ProcessDirtyTiles(ScatterStream stream)
         {
+            Profiler.BeginSample("ScatterStream.TileStreamer.ProcessDirtyTiles");
+
             try
             {
                 switch (stream.renderingMode)
                 {
                     case RenderingMode.DrawMeshInstanced:
                         // Save dirty tiles to disk.
+                        var tileCoordsToRemove = new HashSet<TileCoords>();
                         foreach (var tileCoords in stream.dirtyInstancedRenderingTiles)
                         {
                             if (!stream.tilesBeingStreamedIn.Contains(tileCoords))
@@ -459,9 +485,16 @@ namespace AshleySeric.ScatterStream
                                 tile.RenderBounds = Tile.GetTileBounds_LocalToStream(tile.instances, stream);
                                 // Save this tile to disk.
                                 SaveTileToDisk(default, stream, tileCoords);
+                                tileCoordsToRemove.Add(tileCoords);
                             }
                         }
-                        stream.dirtyInstancedRenderingTiles.Clear();
+
+                        // Remove processed tiles outside the foreach.
+                        foreach (var tileCoords in tileCoordsToRemove)
+                        {
+                            stream.dirtyInstancedRenderingTiles.Remove(tileCoords);
+                        }
+                        tileCoordsToRemove.Clear();
                         break;
                     case RenderingMode.Entities:
                         var streamGuid = stream.id;
@@ -485,8 +518,10 @@ namespace AshleySeric.ScatterStream
             }
             catch (Exception e)
             {
-                Debug.LogError($"Something wen't wrong attempting to process dirty tile. {e}");
+                Debug.LogError($"Something went wrong attempting to process dirty tile. {e}");
             }
+
+            Profiler.EndSample();
         }
 
         private void SaveTileToDisk(Entity tileEntity, ScatterStream stream, TileCoords tileCoords)
