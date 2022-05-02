@@ -98,7 +98,7 @@ namespace AshleySeric.ScatterStream
                 var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
                 if (Vector3.Distance(cameraPositionLocalToStream, stream.localCameraPositionAtLastStream) > stream.streamingCameraMovementThreshold)
                 {
-                    RunStreamingTasks(stream, cameraPositionLocalToStream);
+                    _ = RunStreamingTasks(stream, cameraPositionLocalToStream);
                 }
             }
         }
@@ -126,7 +126,7 @@ namespace AshleySeric.ScatterStream
 
         private async Task<NativeHashSet<TileCoords>> CollectTileCoordsInRange(float3 cameraPositionStreamSpace, float distance, ScatterStream stream)
         {
-            var results = new NativeHashSet<TileCoords>((int)math.ceil(stream.tileWidth * distance * distance), Allocator.Persistent);
+            var results = new NativeHashSet<TileCoords>((int)math.ceil((distance * distance) / stream.tileWidth), Allocator.Persistent);
             var indexLimit = (int)math.ceil(distance / stream.tileWidth);
             var cameraPosFlattened = new float2(cameraPositionStreamSpace.x, cameraPositionStreamSpace.z);
 
