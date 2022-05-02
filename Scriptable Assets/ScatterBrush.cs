@@ -1,12 +1,12 @@
 /*  Created by Ashley Seric  |  ashleyseric.com  |  https://github.com/ashleyseric  */
 
+using System.Collections.Generic;
 using Unity.Mathematics;
 using UnityEngine;
 
 namespace AshleySeric.ScatterStream
 {
-    [System.Serializable]
-    [CreateAssetMenu(fileName = "Brush", menuName = "Scatter Stream/Brush", order = 0)]
+    [System.Serializable, CreateAssetMenu(fileName = "Brush", menuName = "Scatter Stream/Brush", order = 0)]
     public class ScatterBrush : ScriptableObject
     {
         public LayerMask layerMask;
@@ -29,7 +29,21 @@ namespace AshleySeric.ScatterStream
         public float positionNoiseStrength = 0f;
         public bool conformBrushToSurface = false;
         public bool randomiseYRotation = true;
+        /// <summary>
+        /// How close to a forbidden surface can items be placed.
+        /// </summary>
+        [Tooltip("How close to a forbidden surface can items be placed.")]
+        public float filterPadding = 0f;
+        /// <summary>
+        /// Quality of the filer padding evaluation.
+        /// </summary>
+        [Tooltip("Quality of the filer padding evaluation.  Default = 4.")]
+        [Range(3, 9)]
+        public int filterPrecision = 4;
+        public List<ScatterFilter> filters = new List<ScatterFilter>();
         public StrokeProcessingType strokeType = StrokeProcessingType.Immediate;
         public int maxDeferredStrokesBeforeProcessingDirty = 3;
+        public float maxTileEncodeTimePerFrame = 5f;
+        public int maxTileEncodingItemsPerFrame = 5000;
     }
 }

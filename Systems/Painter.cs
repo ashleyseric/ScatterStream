@@ -212,7 +212,6 @@ namespace AshleySeric.ScatterStream
 
         private async Task ProcessBrush_Delete(BrushPlacementData brushState, ScatterStream stream)
         {
-            Profiler.BeginSample("ScatterStream.Painter.ProcessBrush_Delete");
             var brushRadius = brushState.diameter * 0.5f;
             var streamRenderingMode = stream.renderingMode;
             var sqrDistance = brushRadius * brushRadius;
@@ -315,14 +314,12 @@ namespace AshleySeric.ScatterStream
             }
 
             stream.contentModificationOwner = null;
-            Profiler.EndSample();
         }
 
         private async Task ProcessBrush_Add(BrushPlacementData brushState, ScatterStream stream)
         {
-            Profiler.BeginSample("ScatterStream.Painter.ProcessBrush_Add (pre async)");
             var rotationOffset = stream.presets.Presets[brushState.presetIndex].rotationOffset.value;
-            var matricesToPlace = GetBrushPlacementMatrices(stream.brushConfig, brushState.diameter, stream.presets.Presets[brushState.presetIndex].scaleMultiplier, rotationOffset, brushState);
+            NativeHashSet<float4x4> matricesToPlace = await GetBrushPlacementMatrices(stream.brushConfig, brushState.diameter, stream.presets.Presets[brushState.presetIndex].scaleMultiplier, rotationOffset, brushState);
 
             // Capture variables for access in the job.
             var scaleRange = stream.brushConfig.scaleRange;
@@ -332,7 +329,6 @@ namespace AshleySeric.ScatterStream
             var tileWidth = stream.tileWidth;
             var entityPrefab = stream.itemPrefabEntities[brushState.presetIndex];
             var selPresetIndex = brushState.presetIndex;
-            var positionsToPlaceEnumerator = matricesToPlace.GetEnumerator();
             var placementRotation = (quaternion)rotationOffset;
             var streamToWorldMatrix_Inverse = Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix);
 
@@ -350,12 +346,6 @@ namespace AshleySeric.ScatterStream
                 case RenderingMode.DrawMeshInstanced:
                     var positionCount = matricesToPlace.Count();
                     var matrices = matricesToPlace.ToNativeArray(Allocator.Persistent);
-
-                    // End profiling for now as we're about to span multiple async frames.
-                    Profiler.EndSample();
-
-                    // Begin profiling again now we're finished the async processing.
-                    Profiler.BeginSample("ScatterStream.Painter.ProcessBrush_Add (post async)");
                     var changedTiles = new HashSet<TileCoords>();
 
                     // Do the actual spawning back outside of the job.
@@ -379,6 +369,8 @@ namespace AshleySeric.ScatterStream
                 case RenderingMode.Entities:
                     var spawnItemsBuffer = new EntityCommandBuffer(Allocator.TempJob);
                     var overlappingTiles = GetOrCreateOverlappingTiles(matricesToPlace, stream);
+                    var positionsToPlaceEnumerator = matricesToPlace.GetEnumerator();
+
                     Dependency = Job.WithCode(() =>
                     {
                         while (positionsToPlaceEnumerator.MoveNext())
@@ -397,16 +389,14 @@ namespace AshleySeric.ScatterStream
 
             stream.contentModificationOwner = null;
             matricesToPlace.Dispose();
-            Profiler.EndSample();
         }
 
         /// <summary>
         /// Get all valid brush positions as per brush config/position.
         /// </summary>
         /// <returns>HashSet of world space placement positions.</returns>
-        private NativeHashSet<float4x4> GetBrushPlacementMatrices(ScatterBrush brush, float diameter, float3 scaleMultiplier, quaternion rotationOffset, BrushPlacementData brushState)
+        private async Task<NativeHashSet<float4x4>> GetBrushPlacementMatrices(ScatterBrush brush, float diameter, float3 scaleMultiplier, quaternion rotationOffset, BrushPlacementData brushState, int maxHitsPerRay = 1)
         {
-            Profiler.BeginSample("ScatterStream.Painter.GetBrushPositions");
             // Capture variables for access within the job.
             var localUp = new Quaternion(rotationOffset.value.x, rotationOffset.value.y, rotationOffset.value.z, rotationOffset.value.w) * new Vector3(0, 1, 0);
             var scaleRange = brush.scaleRange;
@@ -414,88 +404,71 @@ namespace AshleySeric.ScatterStream
             var spacing = brush.spacing;
             var layerMask = brush.layerMask;
             var noiseScale = brush.noiseScale;
-            var rowCount = (int)math.ceil(diameter / brush.spacing);
-            var total = rowCount * rowCount;
-            var commands = new NativeArray<RaycastCommand>(total, Allocator.TempJob);
+            var itemsPerRow = (int)math.ceil(diameter / brush.spacing);
+            var maxCount = itemsPerRow * itemsPerRow; // Square grid.
+            var isUsingFilterPadding = brush.filters != null && brush.filters.Count > 0 && brush.filterPadding > 0 && !Mathf.Approximately(brush.filterPadding, 0f);
+            var filterPrecision = isUsingFilterPadding ? brush.filterPrecision : 0;
+
+            if (isUsingFilterPadding)
+            {
+                // Add extra raycast slots that will form a ring around each
+                // hit point to run filter padding checks.
+                maxCount += maxCount * brush.filterPrecision;
+            }
+
             var raycastDir = -(float3)brushState.normal;
             var brushPosition = (float3)brushState.position;
-            var maxNoiseOffset = brush.positionNoiseStrength * spacing;
-            int maxHits = 20;
 
             // Need to switch to new physics system to use new math library/burst. https://docs.unity3d.com/Packages/com.unity.physics@0.0/manual/collision_queries.html
-            Dependency = Job.WithCode(() =>
-            {
-                for (int x = 0; x < rowCount; x++)
-                {
-                    for (int z = 0; z < rowCount; z++)
-                    {
-                        // Find grid-snapped point closest to this one.
-                        var pos = brushPosition - new float3(brushPosition.x % spacing, 0, brushPosition.z % spacing);
-                        // Lift raycast start point up to radius of the brush.
-                        pos -= raycastDir * brushRadius;
-                        // Find grid position.
-                        pos.x -= (float)spacing * x - brushRadius;
-                        pos.z -= (float)spacing * z - brushRadius;
-                        // Select a random rotation as a direction vector and multiply that by the offset.
-                        var offsetRot = quaternion.Euler(0, noise.snoise(new float2(pos.x / noiseScale, 0.5f) * 360f), 0);
-                        // Apply deterministic noise offset only using horizontal position.
-                        pos += maxNoiseOffset * math.mul(offsetRot, new float3(1f, 0f, 0f)) * noise.snoise(new float2(pos.z / noiseScale, 0.5f));
-                        // Add to raycast command array.
-                        commands[(x * rowCount) + z] = new RaycastCommand(pos, raycastDir, Mathf.Infinity, layerMask, maxHits);
-                    }
-                }
-            }).Schedule(Dependency);
-            Dependency.Complete();
+            // Work out brush scattering positions across parallel theads.
+            var commandsRaw = await GetBrushPositionsJob.GetBrushRawRaycastCommands(
+                itemsPerRow: itemsPerRow,
+                filterPrecision: filterPrecision,
+                filterPadding: brush.filterPadding,
+                brushPosition: brushPosition,
+                raycastDir: raycastDir,
+                brushRadius: brushRadius,
+                spacing: spacing,
+                noiseScale: noiseScale,
+                maxNoiseOffset: brush.positionNoiseStrength * spacing,
+                layerMask: layerMask,
+                maxHitsPerRay: maxHitsPerRay,
+                maxCount: maxCount,
+                allocator: Allocator.Persistent
+            );
+
+            var radiusTrimmedCommands = await FilterBrushPositionsByRadiusJob.GetFilteredRaycastCommands(
+                brushPosition: brushPosition,
+                brushNormal: brushState.normal,
+                radius: brushRadius,
+                itemChunkSize: filterPrecision + 1,
+                inputCommands: commandsRaw,
+                allocator: Allocator.Persistent
+            );
+            commandsRaw.Dispose();
 
             // Schedule the batch of raycasts.
-            var raycastHits = new NativeArray<RaycastHit>(total * maxHits, Allocator.TempJob);
-            Dependency = RaycastCommand.ScheduleBatch(commands, raycastHits, 16, Dependency);
-            Dependency.Complete();
-            commands.Dispose();
-
-            var brushHitPos = (float3)brushState.position;
-            var brushRadiusSqr = brushRadius * brushRadius;
-            var matricesToPlace = new NativeHashSet<float4x4>(raycastHits.Length, Allocator.Persistent);
-
-            Dependency = Job.WithCode(() =>
-            {
-                for (int i = 0; i < raycastHits.Length; i++)
-                {
-                    var hit = raycastHits[i];
-
-                    // Skip if we didn't hit anything with this ray.
-                    if (hit.distance == 0f)
-                    {
-                        continue;
-                    }
-
-                    // Discard rays outside brush radius.
-                    if (math.distancesq(brushHitPos, hit.point) < brushRadiusSqr)
-                    {
-                        matricesToPlace.Add(
-                            float4x4.TRS(
-                                translation: hit.point,
-                                rotation: math.mul(
-                                    rotationOffset,
-                                    quaternion.AxisAngle(
-                                        localUp,
-                                        noise.cnoise(new float2(hit.point.x / noiseScale, hit.point.z / noiseScale)) * 360)
-                                ),
-                                scale: scaleMultiplier * math.lerp(
-                                    new float3(scaleRange.x, scaleRange.x, scaleRange.x),
-                                    new float3(scaleRange.y, scaleRange.y, scaleRange.y),
-                                    math.abs(noise.cnoise(new float2(hit.point.x / noiseScale, hit.point.z / noiseScale)))
-                                )
-                            )
-                        );
-                    }
-                }
-            }).Schedule(Dependency);
-            Dependency.Complete();
-
+            var raycastHits = new NativeArray<RaycastHit>(maxCount * maxHitsPerRay, Allocator.Persistent);
+            var raycastHandle = RaycastCommand.ScheduleBatch(radiusTrimmedCommands, raycastHits, 16, Dependency);
+            await raycastHandle;
+            raycastHandle.Complete();
+            radiusTrimmedCommands.Dispose();
+            var result = await FilterBrushRaysJob.GetFilteredHits(
+                brush: brush,
+                localUp: localUp,
+                brushHitPos: brushPosition,
+                rotationOffset: rotationOffset,
+                scaleMultiplier: scaleMultiplier,
+                noiseScale: noiseScale,
+                scaleRange: scaleRange,
+                filterPrecision: filterPrecision,
+                brushRadius: brushRadius,
+                raycastHits: raycastHits,
+                allocator: Allocator.Persistent
+            );
             raycastHits.Dispose();
-            Profiler.EndSample();
-            return matricesToPlace;
+
+            return result;
         }
 
         private NativeHashMap<TileCoords, Entity> GetOrCreateOverlappingTiles(NativeHashSet<float4x4> positions, ScatterStream stream)

@@ -72,9 +72,7 @@ namespace AshleySeric.ScatterStream
 
             if (stream.contentModificationOwner == null)
             {
-                stream.contentModificationOwner = this;
                 ProcessDirtyTiles(stream);
-                stream.contentModificationOwner = null;
             }
 
             switch (stream.renderingMode)
@@ -94,85 +92,62 @@ namespace AshleySeric.ScatterStream
                     break;
             }
 
-            if (stream.contentModificationOwner == null)
+            if (!stream.isRunningStreamingTasks && stream.contentModificationOwner == null)
             {
-                stream.contentModificationOwner = this;
                 // Load tile's in range if they haven't been already.
-                if (!stream.isRunningStreamingTasks)
+                var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
+                if (Vector3.Distance(cameraPositionLocalToStream, stream.localCameraPositionAtLastStream) > stream.streamingCameraMovementThreshold)
                 {
-                    var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
-                    if (Vector3.Distance(cameraPositionLocalToStream, stream.localCameraPositionAtLastStream) > stream.streamingCameraMovementThreshold)
-                    {
-                        RunStreamingTasks(stream, cameraPositionLocalToStream);
-                        stream.localCameraPositionAtLastStream = cameraPositionLocalToStream;
-                    }
+                    RunStreamingTasks(stream, cameraPositionLocalToStream);
                 }
-                stream.contentModificationOwner = null;
             }
         }
 
-        private void RunStreamingTasks(ScatterStream stream, float3 cameraPositionLocalToStream)
+        private async Task RunStreamingTasks(ScatterStream stream, float3 cameraPositionLocalToStream)
         {
-            //Debug.Log(stream.name);
+            stream.contentModificationOwner = this;
             stream.isRunningStreamingTasks = true;
             var streamingDistance = stream.GetStreamingDistance();
 
-            CollectTileCoordsInRange(cameraPositionLocalToStream, streamingDistance, stream, (results) =>
+            var results = await CollectTileCoordsInRange(cameraPositionLocalToStream, streamingDistance, stream);
+            // Swap out the tile coords in range buffer.
+            if (stream.tileCoordsInRange.IsCreated)
             {
-                // Swap out the tile coords in range buffer.
-                if (stream.tileCoordsInRange.IsCreated)
-                {
-                    stream.tileCoordsInRange.Dispose();
-                }
-                stream.tileCoordsInRange = results;
+                stream.tileCoordsInRange.Dispose();
+            }
+            stream.tileCoordsInRange = results;
 
-                UnloadTilesOutOfRange(stream);
-                LoadTilesInRange(stream);
-                stream.isRunningStreamingTasks = false;
-            });
+            UnloadTilesOutOfRange(stream);
+            LoadTilesInRange(stream);
+            stream.localCameraPositionAtLastStream = cameraPositionLocalToStream;
+            stream.isRunningStreamingTasks = false;
+            stream.contentModificationOwner = null;
         }
 
-        private async void CollectTileCoordsInRange(float3 cameraPositionStreamSpace, float distance, ScatterStream stream, Action<NativeHashSet<TileCoords>> onComplete)
+        private async Task<NativeHashSet<TileCoords>> CollectTileCoordsInRange(float3 cameraPositionStreamSpace, float distance, ScatterStream stream)
         {
-            if (onComplete == null)
+            var results = new NativeHashSet<TileCoords>((int)math.ceil(stream.tileWidth * distance * distance), Allocator.Persistent);
+            var indexLimit = (int)math.ceil(distance / stream.tileWidth);
+            var cameraPosFlattened = new float2(cameraPositionStreamSpace.x, cameraPositionStreamSpace.z);
+
+            // Schedule tile sorting job on parallel threads.
+            var tilesInRangeJob = new CollectTileCoordsInRangeJob
             {
-                return;
-            }
+                tileWidth = stream.tileWidth,
+                halfTileWidth = stream.tileWidth * 0.5f,
+                distanceSqr = distance * distance,
+                cameraPositionStreamSpace = cameraPositionStreamSpace,
+                cameraPositionStreamSpaceFlattened = cameraPosFlattened,
+                indexLimit = indexLimit,
+                nearestTileCoords = new int2((int)math.floor(cameraPosFlattened.x / stream.tileWidth), (int)math.floor(cameraPosFlattened.y / stream.tileWidth)),
+                resultsWriter = results.AsParallelWriter()
+            }.Schedule(indexLimit * 2, 16); // x2 as it goes in both directions on each axis.
 
-            Profiler.BeginSample("ScatterStream.TileStreamer.CollectTileCoordsInRange (Async)");
+            // Wait for the tile sorting job to complete.
+            await tilesInRangeJob;
+            tilesInRangeJob.Complete();
 
-            NativeHashSet<TileCoords> results = new NativeHashSet<TileCoords>(1024, Allocator.Persistent);
-
-            // TODO: Move this into jobs.
-            await Task.Run(() =>
-            {
-                float tileWidth = stream.tileWidth;
-                float halfTileWidth = tileWidth * 0.5f;
-                int indexLimit = (int)math.ceil(distance / tileWidth);
-                float distSqr = distance * distance;
-                var cameraPosFlattened = new float2(cameraPositionStreamSpace.x, cameraPositionStreamSpace.z);
-                var nearestTileCoords = new int2((int)math.floor(cameraPosFlattened.x / tileWidth), (int)math.floor(cameraPosFlattened.y / tileWidth));
-
-                for (int x = nearestTileCoords.x - indexLimit; x < nearestTileCoords.x + indexLimit; x++)
-                {
-                    for (int z = nearestTileCoords.y - indexLimit; z < nearestTileCoords.y + indexLimit; z++)
-                    {
-                        var coords = new TileCoords(x, z);
-                        float3 tilePos = Tile.GetTilePosition(coords, tileWidth, halfTileWidth);
-
-                        // Ignore tiles outside our radius.
-                        if (math.distancesq(new float2(tilePos.x, tilePos.z), cameraPosFlattened) + tileWidth > distSqr)
-                        {
-                            continue;
-                        }
-
-                        results.Add(coords);
-                    }
-                }
-            });
-
-            Profiler.EndSample();
-            onComplete.Invoke(results);
+            return results;
         }
 
         /// <summary>
@@ -246,6 +221,13 @@ namespace AshleySeric.ScatterStream
                 });
 
                 tile.RenderBounds = await Tile.GetTileBounds_LocalToStream_Async(tile.instances, stream);
+
+                // Wait for anyone else to finish modifying content
+                if (stream.contentModificationOwner != null)
+                {
+                    await UniTask.WaitUntil(() => stream.contentModificationOwner == null);
+                }
+
                 stream.LoadedInstanceRenderingTiles.Add(coords, tile);
                 stream.areInstancedRenderingSortedBuffersDirty = true;
             }
@@ -331,11 +313,10 @@ namespace AshleySeric.ScatterStream
 
         private void LoadTilesInRange(ScatterStream stream)
         {
-            Profiler.BeginSample("ScatterStream.TileStreamer.LoadTilesInRange");
-
             switch (stream.renderingMode)
             {
                 case RenderingMode.DrawMeshInstanced:
+                    Profiler.BeginSample("ScatterStream.TileStreamer.QueueAsyncLoadingTilesInRange_InstancedRendering");
                     foreach (var coords in stream.tileCoordsInRange)
                     {
                         if (!stream.tilesBeingStreamedIn.Contains(coords) &&
@@ -348,6 +329,7 @@ namespace AshleySeric.ScatterStream
 
                     break;
                 case RenderingMode.Entities:
+                    Profiler.BeginSample("ScatterStream.TileStreamer.LoadTilesInRange_Entities");
                     var commandBuffer = new EntityCommandBuffer(Allocator.Persistent);
                     var streamGuid = stream.id;
 
@@ -465,9 +447,9 @@ namespace AshleySeric.ScatterStream
             Profiler.EndSample();
         }
 
-        private void ProcessDirtyTiles(ScatterStream stream)
+        private async void ProcessDirtyTiles(ScatterStream stream)
         {
-            Profiler.BeginSample("ScatterStream.TileStreamer.ProcessDirtyTiles");
+            stream.contentModificationOwner = this;
 
             try
             {
@@ -484,7 +466,7 @@ namespace AshleySeric.ScatterStream
                                 var tile = stream.LoadedInstanceRenderingTiles[tileCoords];
                                 tile.RenderBounds = Tile.GetTileBounds_LocalToStream(tile.instances, stream);
                                 // Save this tile to disk.
-                                SaveTileToDisk(default, stream, tileCoords);
+                                await SaveTileToDisk_InstancedRendering(stream, tileCoords);
                                 tileCoordsToRemove.Add(tileCoords);
                             }
                         }
@@ -505,7 +487,7 @@ namespace AshleySeric.ScatterStream
                         {
                             if (tile.StreamId == streamGuid)
                             {
-                                SaveTileToDisk(tileEntity, stream, tile.Coords);
+                                SaveTileToDisk_Entities(tileEntity, stream, tile.Coords);
                                 commandBuffer.RemoveComponent<DirtyTag>(tileEntity);
                                 // Ensure we don't exclude this tile from streaming ops if it's been newly created.
                                 stream.attemptedLoadButDoNotExist.Remove(tile.Coords);
@@ -521,74 +503,88 @@ namespace AshleySeric.ScatterStream
                 Debug.LogError($"Something went wrong attempting to process dirty tile. {e}");
             }
 
-            Profiler.EndSample();
+            stream.contentModificationOwner = null;
         }
 
-        private void SaveTileToDisk(Entity tileEntity, ScatterStream stream, TileCoords tileCoords)
+        private async Task SaveTileToDisk_InstancedRendering(ScatterStream stream, TileCoords tileCoords)
+        {
+            if (!stream.LoadedInstanceRenderingTiles.ContainsKey(tileCoords))
+            {
+                Debug.LogError("Attempting to save a tile that isn't currently loaded.");
+                return;
+            }
+
+            var fileName = stream.GetTileFilePath(tileCoords);
+            var tileInstances = stream.LoadedInstanceRenderingTiles[tileCoords].instances;
+
+            await Task.Run(async () =>
+            {
+                // Delete any existing file for this tile.
+                if (File.Exists(fileName))
+                {
+                    File.Delete(fileName);
+                }
+
+                if (tileInstances.Sum(x => x.Count) > 0)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(fileName));
+
+                    // Save this tile to disk.
+                    using (var writeStream = File.OpenWrite(fileName))
+                    {
+                        using (var writer = new BinaryWriter(writeStream))
+                        {
+                            await EncodeToTileCache(
+                                tileInstances,
+                                writer,
+                                stream.brushConfig.maxTileEncodeTimePerFrame,
+                                stream.brushConfig.maxTileEncodingItemsPerFrame);
+                        }
+                    }
+                }
+            });
+        }
+
+        private void SaveTileToDisk_Entities(Entity tileEntity, ScatterStream stream, TileCoords tileCoords)
         {
             var fileName = stream.GetTileFilePath(tileCoords);
 
-            switch (stream.renderingMode)
+            // Delete any existing file for this tile.
+            if (File.Exists(fileName))
             {
-                case RenderingMode.DrawMeshInstanced:
-                    if (!stream.LoadedInstanceRenderingTiles.ContainsKey(tileCoords))
+                File.Delete(fileName);
+            }
+
+            var tileItemBuffer = GetBufferFromEntity<ScatterItemEntityBuffer>(true)[tileEntity];
+
+            if (tileItemBuffer.Length > 0)
+            {
+                // Save this tile to disk.
+                Directory.CreateDirectory(Path.GetDirectoryName(fileName));
+                using (var writeStream = File.OpenWrite(fileName))
+                {
+                    using (var writer = new BinaryWriter(writeStream))
                     {
-                        Debug.LogError("Attempting to save a tile that isn't currently loaded.");
-                        return;
+                        EncodeToTileCache(tileItemBuffer, writer);
                     }
-
-                    var tileInstances = stream.LoadedInstanceRenderingTiles[tileCoords].instances;
-
-                    // Delete any existing file for this tile.
-                    if (File.Exists(fileName))
-                    {
-                        File.Delete(fileName);
-                    }
-
-                    if (tileInstances.Sum(x => x.Count) > 0)
-                    {
-                        Directory.CreateDirectory(Path.GetDirectoryName(fileName));
-
-                        // Save this tile to disk.
-                        using (var writeStream = File.OpenWrite(fileName))
-                        {
-                            using (var writer = new BinaryWriter(writeStream))
-                            {
-                                EncodeToTileCache(tileInstances, writer);
-                            }
-                        }
-                    }
-                    break;
-                case RenderingMode.Entities:
-                    var tileItemBuffer = GetBufferFromEntity<ScatterItemEntityBuffer>(true)[tileEntity];
-
-                    // Delete any existing file for this tile.
-                    if (File.Exists(fileName))
-                    {
-                        File.Delete(fileName);
-                    }
-
-                    if (tileItemBuffer.Length > 0)
-                    {
-                        // Save this tile to disk.
-                        Directory.CreateDirectory(Path.GetDirectoryName(fileName));
-                        using (var writeStream = File.OpenWrite(fileName))
-                        {
-                            using (var writer = new BinaryWriter(writeStream))
-                            {
-                                EncodeToTileCache(tileItemBuffer, writer);
-                            }
-                        }
-                    }
-                    break;
+                }
             }
         }
 
-        private static void EncodeToTileCache(List<List<Matrix4x4>> tileInstances, BinaryWriter writer)
+        private static async Task EncodeToTileCache(List<List<Matrix4x4>> tileInstances,
+                                                    BinaryWriter writer,
+                                                    float maxTimePerFrame,
+                                                    int maxTileEncodingItemsPerFrame)
         {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             // Write file format version as the first 4 bytes.
             writer.Write(TILE_FILE_FORMAT_VERSION);
             int presetCount = tileInstances.Count;
+            // 12 for position
+            // 16 for rotation
+            // 12 for scale
+            //  4 for presetIndex
+            var bytes = new byte[44];
 
             // TODO: Store in order of presets allowing sequential loading as well as reduced
             //       file sizes since we wouldn't need to store the preset index for each instance.
@@ -620,6 +616,15 @@ namespace AshleySeric.ScatterStream
 
                     // Preset index
                     writer.Write(presetIndex);
+
+                    // Checke every 100 items if we should await a frame.
+                    if (stopwatch.ElapsedMilliseconds > maxTimePerFrame || presetIndex > maxTileEncodingItemsPerFrame)
+                    {
+                        GC.Collect();
+                        await UniTask.NextFrame();
+                        stopwatch.Reset();
+                        stopwatch.Start();
+                    }
                 }
             }
         }
