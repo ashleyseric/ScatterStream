@@ -124,26 +124,31 @@ namespace AshleySeric.ScatterStream
                     await UniTask.NextFrame(PlayerLoopTiming.PostLateUpdate);
                 }
 
-                switch (state.mode)
+                try
                 {
-                    default:
-                    case PlacementMode.None:
-                        break;
-                    case PlacementMode.Add:
-                        await ProcessBrush_Add(state, stream);
-                        break;
-                    case PlacementMode.Delete:
-                        await ProcessBrush_Delete(state, stream);
-                        break;
-                    case PlacementMode.Replace:
-                        await ProcessBrush_Delete(state, stream);
-                        await ProcessBrush_Add(state, stream);
-                        break;
+                    switch (state.mode)
+                    {
+                        default:
+                        case PlacementMode.None:
+                            break;
+                        case PlacementMode.Add:
+                            await ProcessBrush_Add(state, stream);
+                            break;
+                        case PlacementMode.Delete:
+                            await ProcessBrush_Delete(state, stream);
+                            break;
+                        case PlacementMode.Replace:
+                            await ProcessBrush_Delete(state, stream);
+                            await ProcessBrush_Add(state, stream);
+                            break;
+                    }
                 }
-
-                strokeCountProcessedThisBatch[stream.id]++;
-                state.onProcessingComplete?.Invoke();
-                pendingStrokes.Dequeue();
+                finally
+                {
+                    strokeCountProcessedThisBatch[stream.id]++;
+                    state.onProcessingComplete?.Invoke();
+                    pendingStrokes.Dequeue();
+                }
             }
         }
 
@@ -268,41 +273,38 @@ namespace AshleySeric.ScatterStream
                         var instanceDataFromEntity = GetComponentDataFromEntity<ScatterItemEntityData>();
                         var position = brushState.position;
                         var presetIndex = brushState.presetIndex;
+                        var transLookup = GetComponentDataFromEntity<Translation>();
 
-                        Dependency = Job.WithCode(() =>
+                        foreach (var tileEntity in tiles)
                         {
-                            var transLookup = GetComponentDataFromEntity<Translation>();
-                            foreach (var tileEntity in tiles)
+                            var tileItemBuffer = entityBufferLookup[tileEntity];
+                            var items = tileItemBuffer.ToNativeArray(Allocator.Temp);
+                            bool anyDeleted = false;
+
+                            // Iterate in reverse as we'll be removing buffer elements by index as we go.
+                            for (int i = items.Length - 1; i >= 0; i--)
                             {
-                                var tileItemBuffer = entityBufferLookup[tileEntity];
-                                var items = tileItemBuffer.ToNativeArray(Allocator.Temp);
-                                bool anyDeleted = false;
+                                var itemEntity = items[i].Entity;
 
-                                // Iterate in reverse as we'll be removing buffer elements by index as we go.
-                                for (int i = items.Length - 1; i >= 0; i--)
+                                if (instanceDataFromEntity[itemEntity].prefabIndex == presetIndex && math.distancesq(transLookup[itemEntity].Value, position) < sqrDistance)
                                 {
-                                    var itemEntity = items[i].Entity;
-
-                                    if (instanceDataFromEntity[itemEntity].prefabIndex == presetIndex && math.distancesq(transLookup[itemEntity].Value, position) < sqrDistance)
-                                    {
-                                        commandBuffer.DestroyEntity(itemEntity);
-                                        tileItemBuffer.RemoveAt(i);
-                                        anyDeleted = true;
-                                    }
+                                    commandBuffer.DestroyEntity(itemEntity);
+                                    tileItemBuffer.RemoveAt(i);
+                                    anyDeleted = true;
                                 }
-
-                                if (anyDeleted)
-                                {
-                                    // Inform the system this tile needs to be saved (or deleted if empty).
-                                    commandBuffer.AddComponent(tileEntity, new DirtyTag());
-                                }
-
-                                items.Dispose();
                             }
-                        }).Schedule(Dependency);
+
+                            if (anyDeleted)
+                            {
+                                // Inform the system this tile needs to be saved (or deleted if empty).
+                                commandBuffer.AddComponent(tileEntity, new DirtyTag());
+                            }
+
+                            items.Dispose();
+                        }
+
                         sim.AddJobHandleForProducer(Dependency);
                         Dependency.Complete();
-
                         commandBuffer.Playback(EntityManager);
                         commandBuffer.Dispose();
                         break;
@@ -371,17 +373,14 @@ namespace AshleySeric.ScatterStream
                     var overlappingTiles = GetOrCreateOverlappingTiles(matricesToPlace, stream);
                     var positionsToPlaceEnumerator = matricesToPlace.GetEnumerator();
 
-                    Dependency = Job.WithCode(() =>
+                    while (positionsToPlaceEnumerator.MoveNext())
                     {
-                        while (positionsToPlaceEnumerator.MoveNext())
-                        {
-                            SpawnScatterItemECS(positionsToPlaceEnumerator.Current, overlappingTiles, selPresetIndex, entityPrefab, streamGuid, tileWidth, spawnItemsBuffer);
-                        }
-                    }).Schedule(Dependency);
+                        SpawnScatterItemECS(positionsToPlaceEnumerator.Current, overlappingTiles, selPresetIndex, entityPrefab, streamGuid, tileWidth, spawnItemsBuffer);
+                    }
+
                     sim.AddJobHandleForProducer(Dependency);
                     Dependency.Complete();
                     overlappingTiles.Dispose();
-
                     spawnItemsBuffer.Playback(EntityManager);
                     spawnItemsBuffer.Dispose();
                     break;
@@ -529,7 +528,6 @@ namespace AshleySeric.ScatterStream
                                                                     float tileWidth)
         {
             var itemMatrixLocalToStream = math.mul(streamToWorldMatrix_Inverse, matrix);
-            // TODO: Find out why the loaded tiles aren't going here.
             var tileCoords = Tile.GetGridTileIndex(itemMatrixLocalToStream.GetPosition(), tileWidth);
             Tile_InstancedRendering tile = default;
 
@@ -542,8 +540,6 @@ namespace AshleySeric.ScatterStream
                     RenderBounds = Tile.GetTileBounds(tileCoords, stream.tileWidth, stream.tileWidth * 0.5f)
                 };
                 // Add this tile as no other scatter items have been placed on it yet.
-                // TODO: Check against tiles that are out of loading range so we don't step on the toes
-                //       of whatever contents are stored on disk while painting.
                 stream.LoadedInstanceRenderingTiles.Add(tileCoords, tile);
             }
             else

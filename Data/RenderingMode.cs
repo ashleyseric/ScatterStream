@@ -5,7 +5,7 @@ namespace AshleySeric.ScatterStream
     [System.Serializable]
     public enum RenderingMode
     {
-        Entities,
-        DrawMeshInstanced
+        DrawMeshInstanced,
+        Entities
     }
 }

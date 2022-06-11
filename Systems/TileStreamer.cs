@@ -73,11 +73,9 @@ namespace AshleySeric.ScatterStream
             if (stream.contentModificationOwner == null)
             {
                 ProcessDirtyTiles(stream);
-            }
 
-            switch (stream.renderingMode)
-            {
-                case RenderingMode.Entities:
+                if (stream.renderingMode == RenderingMode.Entities)
+                {
                     // Collect a list of loaded tiles.
                     stream.loadedTileCoords.Clear();
                     var streamId = stream.id;
@@ -89,7 +87,7 @@ namespace AshleySeric.ScatterStream
                             stream.loadedTileCoords.Add(tile.Coords);
                         }
                     }).WithoutBurst().Run();
-                    break;
+                }
             }
 
             if (!stream.isRunningStreamingTasks && stream.contentModificationOwner == null)
@@ -481,22 +479,37 @@ namespace AshleySeric.ScatterStream
                     case RenderingMode.Entities:
                         var streamGuid = stream.id;
                         var commandBuffer = new EntityCommandBuffer(Allocator.Persistent);
+                        var manager = World.DefaultGameObjectInjectionWorld.EntityManager;
+                        var dirtyTilesQuery = manager.CreateEntityQuery(typeof(Tile), typeof(DirtyTag));
+                        var tileEntities = dirtyTilesQuery.ToEntityArray(Allocator.Persistent);
+                        var filter = manager.GetEntityQueryMask(dirtyTilesQuery);
 
                         // Save dirty tiles to disk.
-                        Entities.ForEach((Entity tileEntity, in Tile tile, in DirtyTag tag) =>
+                        foreach (var tileEntity in tileEntities)
                         {
-                            if (tile.StreamId == streamGuid)
+                            // Esure this is still a valid dirty tile as we may
+                            // have waited a few frames since the initial query.
+                            if (!tileEntity.Equals(Entity.Null) && filter.Matches(tileEntity))
                             {
-                                SaveTileToDisk_Entities(tileEntity, stream, tile.Coords);
-                                commandBuffer.RemoveComponent<DirtyTag>(tileEntity);
-                                // Ensure we don't exclude this tile from streaming ops if it's been newly created.
-                                stream.attemptedLoadButDoNotExist.Remove(tile.Coords);
+                                var tile = GetComponent<Tile>(tileEntity);
+
+                                if (tile.StreamId == streamGuid)
+                                {
+                                    await SaveTileToDisk_Entities(tileEntity, stream, tile.Coords);
+                                    commandBuffer.RemoveComponent<DirtyTag>(tileEntity);
+                                    // Ensure we don't exclude this tile from streaming ops if it's been newly created.
+                                    stream.attemptedLoadButDoNotExist.Remove(tile.Coords);
+                                }
                             }
-                        }).WithReadOnly(typeof(ScatterItemEntityBuffer)).WithoutBurst().Run();
+                        }
+
+                        tileEntities.Dispose();
+                        dirtyTilesQuery.Dispose();
                         commandBuffer.Playback(EntityManager);
                         commandBuffer.Dispose();
                         break;
                 }
+
             }
             catch (Exception e)
             {
@@ -545,7 +558,7 @@ namespace AshleySeric.ScatterStream
             });
         }
 
-        private void SaveTileToDisk_Entities(Entity tileEntity, ScatterStream stream, TileCoords tileCoords)
+        private async Task SaveTileToDisk_Entities(Entity tileEntity, ScatterStream stream, TileCoords tileCoords)
         {
             var fileName = stream.GetTileFilePath(tileCoords);
 
@@ -565,13 +578,18 @@ namespace AshleySeric.ScatterStream
                 {
                     using (var writer = new BinaryWriter(writeStream))
                     {
-                        EncodeToTileCache(tileItemBuffer, writer);
+                        await EncodeToTileCache(
+                            tileEntity,
+                            tileItemBuffer,
+                            writer,
+                            stream.brushConfig.maxTileEncodeTimePerFrame,
+                            stream.brushConfig.maxTileEncodingItemsPerFrame);
                     }
                 }
             }
         }
 
-        private static async Task EncodeToTileCache(List<List<Matrix4x4>> tileInstances,
+        private static async Task EncodeToTileCache(List<List<Matrix4x4>> tileItemBuffer,
                                                     BinaryWriter writer,
                                                     float maxTimePerFrame,
                                                     int maxTileEncodingItemsPerFrame)
@@ -579,21 +597,16 @@ namespace AshleySeric.ScatterStream
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             // Write file format version as the first 4 bytes.
             writer.Write(TILE_FILE_FORMAT_VERSION);
-            int presetCount = tileInstances.Count;
-            // 12 for position
-            // 16 for rotation
-            // 12 for scale
-            //  4 for presetIndex
-            var bytes = new byte[44];
+            int presetCount = tileItemBuffer.Count;
 
             // TODO: Store in order of presets allowing sequential loading as well as reduced
             //       file sizes since we wouldn't need to store the preset index for each instance.
             for (int presetIndex = 0; presetIndex < presetCount; presetIndex++)
             {
-                int instanceCount = tileInstances[presetIndex].Count;
+                int instanceCount = tileItemBuffer[presetIndex].Count;
                 for (int instanceIndex = 0; instanceIndex < instanceCount; instanceIndex++)
                 {
-                    var m = tileInstances[presetIndex][instanceIndex];
+                    var m = tileItemBuffer[presetIndex][instanceIndex];
                     var pos = m.GetPosition();
                     var rot = m.GetRotation();
                     var scale = m.GetScale();
@@ -617,7 +630,7 @@ namespace AshleySeric.ScatterStream
                     // Preset index
                     writer.Write(presetIndex);
 
-                    // Checke every 100 items if we should await a frame.
+                    // Check if we should await a frame before continuing.
                     if (stopwatch.ElapsedMilliseconds > maxTimePerFrame || presetIndex > maxTileEncodingItemsPerFrame)
                     {
                         GC.Collect();
@@ -629,50 +642,75 @@ namespace AshleySeric.ScatterStream
             }
         }
 
-        private void EncodeToTileCache(DynamicBuffer<ScatterItemEntityBuffer> tileItemBuffer, BinaryWriter writer)
+        private async Task EncodeToTileCache(Entity tileEntity,
+                                             DynamicBuffer<ScatterItemEntityBuffer> tileItemBuffer,
+                                             BinaryWriter writer,
+                                             float maxTimePerFrame,
+                                             int maxTileEncodingItemsPerFrame)
         {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             var translationFromEntity = GetComponentDataFromEntity<Translation>(true);
             var rotationFromEntity = GetComponentDataFromEntity<Rotation>(true);
             var scaleFromEntity = GetComponentDataFromEntity<NonUniformScale>(true);
             var scatterItemData = GetComponentDataFromEntity<ScatterItemEntityData>(true);
 
-            // File format version
+            // File format version.
             writer.Write(TILE_FILE_FORMAT_VERSION);
 
             for (int i = 0, itemIndex = 0; i < tileItemBuffer.Length * TILE_ITEM_SIZE_IN_BYTES; i += TILE_ITEM_SIZE_IN_BYTES, itemIndex++)
             {
                 var entity = tileItemBuffer[itemIndex];
-                var pos = translationFromEntity[entity].Value;
-                var rot = rotationFromEntity[entity].Value.value;
-                var scale = scaleFromEntity[entity].Value;
+                var pos = translationFromEntity[entity.Entity].Value;
+                var rot = rotationFromEntity[entity.Entity].Value.value;
+                var scale = scaleFromEntity[entity.Entity].Value;
 
-                // Position
+                // Position.
                 writer.Write(pos.x);
                 writer.Write(pos.y);
                 writer.Write(pos.z);
 
-                // Rotation
+                // Rotation.
                 writer.Write(rot.x);
                 writer.Write(rot.y);
                 writer.Write(rot.z);
                 writer.Write(rot.w);
 
-                // Scale
+                // Scale.
                 writer.Write(scale.x);
                 writer.Write(scale.y);
                 writer.Write(scale.z);
 
-                // Preset index
+                var presetIndex = scatterItemData[entity].prefabIndex;
+                // Preset index.
                 // TODO: Swap this to order the list of transforms by prefab index so we don't have to store it for each item.
-                writer.Write(scatterItemData[entity].prefabIndex);
+                writer.Write(presetIndex);
+
+                // TODO: Work out how to allow this await while remaining compatible with ecs calls.
+                // Checke if we should await a frame before continuing.
+                if (stopwatch.ElapsedMilliseconds > maxTimePerFrame || presetIndex > maxTileEncodingItemsPerFrame)
+                {
+                    GC.Collect();
+                    await UniTask.NextFrame();
+                    stopwatch.Reset();
+                    stopwatch.Start();
+
+                    // Refresh ECS getters as there may have been structural changes during the await.
+                    tileItemBuffer = GetBufferFromEntity<ScatterItemEntityBuffer>(true)[tileEntity];
+                    translationFromEntity = GetComponentDataFromEntity<Translation>(true);
+                    rotationFromEntity = GetComponentDataFromEntity<Rotation>(true);
+                    scaleFromEntity = GetComponentDataFromEntity<NonUniformScale>(true);
+                    scatterItemData = GetComponentDataFromEntity<ScatterItemEntityData>(true);
+                }
             }
         }
 
-        private static bool LoadTileCache(BinaryReader reader, ScatterStream stream, Action<ScatterItemInstanceData> onItemLoaded)
+        private static bool LoadTileCache(BinaryReader reader,
+                                          ScatterStream stream,
+                                          Action<ScatterItemInstanceData> onItemLoaded)
         {
             try
             {
-                // File format version
+                // File format version.
                 var formatVersion = reader.ReadInt32();
 
                 if (formatVersion != TILE_FILE_FORMAT_VERSION)
@@ -685,14 +723,14 @@ namespace AshleySeric.ScatterStream
                 // Read placed items from here until the end of the file.
                 while (reader.BaseStream.Position < reader.BaseStream.Length)
                 {
-                    // Position
+                    // Position.
                     var pos = new float3(
                         reader.ReadSingle(),
                         reader.ReadSingle(),
                         reader.ReadSingle()
                     );
 
-                    // Rotation
+                    // Rotation.
                     var rot = new quaternion(
                         reader.ReadSingle(),
                         reader.ReadSingle(),
@@ -700,14 +738,14 @@ namespace AshleySeric.ScatterStream
                         reader.ReadSingle()
                     );
 
-                    // Scale
+                    // Scale.
                     var scale = new float3(
                         reader.ReadSingle(),
                         reader.ReadSingle(),
                         reader.ReadSingle()
                     );
 
-                    // Preset index
+                    // Preset index.
                     var prefabIndex = reader.ReadInt32();
 
                     onItemLoaded?.Invoke(new ScatterItemInstanceData
