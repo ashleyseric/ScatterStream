@@ -2357,6 +2357,7 @@ MonoBehaviour:
   brushSpacingSlider: {fileID: 8708891819512291124}
   streamListItemContainer: {fileID: 3751280121403260708}
   streamListItemPrefab: {fileID: 8477309856697392962, guid: 237ad0a143b25c14d8d79054b43c46fa, type: 3}
+  xmlFilePathInputField: {fileID: 0}
   itemThumbnailContainer: {fileID: 8708891819505876070}
   thumbnailPrefab: {fileID: 2412290484624308115, guid: cc63c1838c4f3404083630dc5262ae07, type: 3}
 --- !u!1 &8708891819374412996

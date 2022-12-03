@@ -30,16 +30,20 @@ namespace AshleySeric.ScatterStream
         public Transform streamListItemContainer;
         public StreamListItem streamListItemPrefab;
 
+        [Header("FP XML Import")]
+        public ImportExport.FpXmlHandler fpXmlHandler;
+
         [Header("Preset Thumbnails")]
         public Transform itemThumbnailContainer;
         public ScatterPresetThumbnail thumbnailPrefab;
+        public ScatterStream EditingStream { get; private set; }
 
         private Transform previousParentTransform = null;
         private Transform brushCursor;
         private DecalProjector cursorProjector;
-        private ScatterStream editingStream;
         private Dictionary<ScatterItemPreset, ScatterPresetThumbnail> presetThumbnails = new Dictionary<ScatterItemPreset, ScatterPresetThumbnail>();
         private Dictionary<ScatterStream, StreamListItem> streamListItems = new Dictionary<ScatterStream, StreamListItem>();
+        private ScatterStream previousEditingStream = null;
 
         private float singePlacementYRotation = 0;
         public static int selectedPresetIndex = 0;
@@ -73,9 +77,15 @@ namespace AshleySeric.ScatterStream
                 stream.CreateEntityPrefabsForAuthoring();
             }
 
-            editingStream = streams.Length > 0 ? streams[0] : null;
+            EditingStream = streams.Length > 0 ? streams[0] : null;
+
             ReloadStreamListItems();
-            OnStreamSelected_Handler(editingStream);
+            OnStreamSelected_Handler(EditingStream);
+
+            if (fpXmlHandler)
+            {
+                fpXmlHandler.OpenPanel(EditingStream);
+            }
         }
 
         private void OnEnable()
@@ -87,8 +97,8 @@ namespace AshleySeric.ScatterStream
 
             if (streams.Length > 0)
             {
-                editingStream = streams[0];
-                ScatterStream.EditingStream = editingStream;
+                EditingStream = streams[0];
+                ScatterStream.EditingStream = EditingStream;
             }
 
             brushDiameterSlider?.onValueChanged.AddListener(BrushDiameterSlider_ChangeHandler);
@@ -102,7 +112,7 @@ namespace AshleySeric.ScatterStream
                 stream.EndStream();
             }
 
-            editingStream.EndStream();
+            EditingStream.EndStream();
             brushDiameterSlider?.onValueChanged.RemoveListener(BrushDiameterSlider_ChangeHandler);
             brushSpacingSlider?.onValueChanged.RemoveListener(BrushSpacingSlider_ChangeHandler);
         }
@@ -122,7 +132,17 @@ namespace AshleySeric.ScatterStream
             // Don't register inputs unless the cursor isn't over any UI elements.
             if (ScatterStream.EditingStream != null && !UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject())
             {
-                ProcessStreamEditing(editingStream);
+                ProcessStreamEditing(EditingStream);
+            }
+
+            if (previousEditingStream != EditingStream)
+            {
+                if (fpXmlHandler != null)
+                {
+                    fpXmlHandler.OpenPanel(EditingStream);
+                }
+
+                previousEditingStream = EditingStream;
             }
         }
 
@@ -133,13 +153,13 @@ namespace AshleySeric.ScatterStream
             bool isEitherControlKeyHeld = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
 
             // Let the ECS systems know which stream to edit.
-            ScatterStream.EditingStream = editingStream;
+            ScatterStream.EditingStream = EditingStream;
 
             if (ScatterStream.EditingStream != null)
             {
                 // Ensure sliders are up to date.
-                brushSpacingSlider.SetValueWithoutNotify(editingStream.brushConfig.spacing);
-                brushDiameterSlider.SetValueWithoutNotify(editingStream.brushConfig.diameter);
+                brushSpacingSlider.SetValueWithoutNotify(EditingStream.brushConfig.spacing);
+                brushDiameterSlider.SetValueWithoutNotify(EditingStream.brushConfig.diameter);
 
                 // Don't register brush shortcut inputs if the cursor is over any UI elements.
                 if (!isPointerOverUI)
@@ -175,14 +195,14 @@ namespace AshleySeric.ScatterStream
             brushCursor.gameObject.SetActive(!isEitherShiftKeyHeld && didBrushHitSurface && !isPointerOverUI);
             brushCursor.position = brushPosition;
             brushCursor.up = brushNormal;
-            brushCursor.localScale = editingStream.brushConfig.diameter * Vector3.one;
+            brushCursor.localScale = EditingStream.brushConfig.diameter * Vector3.one;
 
             if (cursorProjector != null)
             {
                 cursorProjector.size = Vector3.one;
                 // Always 0.5 height offset due to the parent being scaled with brush diameter.
                 cursorProjector.transform.localPosition = new Vector3(0, 0.2f, 0);
-                cursorProjector.size = new Vector3(editingStream.brushConfig.diameter, editingStream.brushConfig.diameter, editingStream.brushConfig.diameter * 1.25f);
+                cursorProjector.size = new Vector3(EditingStream.brushConfig.diameter, EditingStream.brushConfig.diameter, EditingStream.brushConfig.diameter * 1.25f);
             }
 
             // Tell the brush shader it's normal direction.
@@ -192,7 +212,7 @@ namespace AshleySeric.ScatterStream
         private void OnStreamSelected_Handler(ScatterStream stream)
         {
             // Swap the editing stream over.
-            editingStream = stream;
+            EditingStream = stream;
             ReloadPresetThumbnails(stream);
 
             // Refresh brush sliders.
@@ -286,7 +306,7 @@ namespace AshleySeric.ScatterStream
                         position = mouseHit.point,
                         rotation = rotation,
                         scale = scale,
-                        mode = PlacementMode.Add,
+                        mode = isEitherControlKeyHeld ? PlacementMode.Delete : PlacementMode.Add,
                         streamId = stream.id,
                         presetIndex = selectedPresetIndex
                     });
@@ -383,18 +403,21 @@ namespace AshleySeric.ScatterStream
             }
             presetThumbnails.Clear();
 
-            for (int i = 0; i < stream.presets.Presets.Length; i++)
+            if (stream.presets != null && stream.presets.Presets != null && stream.presets.Presets.Length != 0)
             {
-                var preset = stream.presets.Presets[i];
-                var thumbGo = Instantiate(thumbnailPrefab, itemThumbnailContainer);
-                thumbGo.hideFlags = HideFlags.DontSave;
-                var thumb = thumbGo.GetComponent<ScatterPresetThumbnail>();
+                for (int i = 0; i < stream.presets.Presets.Length; i++)
+                {
+                    var preset = stream.presets.Presets[i];
+                    var thumbGo = Instantiate(thumbnailPrefab, itemThumbnailContainer);
+                    thumbGo.hideFlags = HideFlags.DontSave;
+                    var thumb = thumbGo.GetComponent<ScatterPresetThumbnail>();
 
-                int iCaptured = i;
-                thumb.button.onClick.AddListener(() => PresetThumbnailClicked_Handler(preset, iCaptured));
-                thumb.label.text = preset.name;
-                thumb.image.texture = preset.thumbnail;
-                presetThumbnails.Add(preset, thumb);
+                    int iCaptured = i;
+                    thumb.button.onClick.AddListener(() => PresetThumbnailClicked_Handler(preset, iCaptured));
+                    thumb.label.text = preset.name;
+                    thumb.image.texture = preset.thumbnail;
+                    presetThumbnails.Add(preset, thumb);
+                }
             }
         }
 
@@ -413,17 +436,17 @@ namespace AshleySeric.ScatterStream
 
         private void BrushDiameterSlider_ChangeHandler(float value)
         {
-            if (editingStream != null)
+            if (EditingStream != null)
             {
-                editingStream.brushConfig.diameter = value;
+                EditingStream.brushConfig.diameter = value;
             }
         }
 
         private void BrushSpacingSlider_ChangeHandler(float value)
         {
-            if (editingStream != null)
+            if (EditingStream != null)
             {
-                editingStream.brushConfig.spacing = value;
+                EditingStream.brushConfig.spacing = value;
             }
         }
     }
