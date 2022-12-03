@@ -9,7 +9,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 2658447746701242176}
-  m_Layer: 0
+  m_Layer: 6
   m_Name: Brush Cursor - Pending Deferred Stroke
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -42,7 +42,7 @@ GameObject:
   - component: {fileID: 3736654074679082019}
   - component: {fileID: 5578979293770727395}
   - component: {fileID: 1106913347975416895}
-  m_Layer: 0
+  m_Layer: 6
   m_Name: Sphere
   m_TagString: Untagged
   m_Icon: {fileID: 0}

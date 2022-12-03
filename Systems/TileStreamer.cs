@@ -20,11 +20,11 @@ namespace AshleySeric.ScatterStream
     [UpdateInGroup(typeof(ScatterStreamSystemGroup))]
     public class TileStreamer : SystemBase
     {
-        public const int TILE_FILE_FORMAT_VERSION = 1;
+        public const int TILE_FILE_FORMAT_VERSION = 2;
         /// <summary>
         /// (4 for version number) + (16 * 2 for pos and scale) + (20 for rot) + (4 for prefabIndex).
         /// </summary>
-        public const int TILE_ITEM_SIZE_IN_BYTES = 48;
+        public const int TILE_ITEM_SIZE_IN_BYTES = 64;
 
         /// <summary>
         /// Used by UnloadTilesOutOfRange method.
@@ -35,7 +35,6 @@ namespace AshleySeric.ScatterStream
 
         protected override void OnUpdate()
         {
-
             foreach (var streamKeyValue in ScatterStream.ActiveStreams)
             {
                 if (streamKeyValue.Value != null)
@@ -70,7 +69,7 @@ namespace AshleySeric.ScatterStream
                 }
             }
 
-            if (stream.contentModificationOwner == null)
+            if (stream.contentModificationLockOwner == null)
             {
                 ProcessDirtyTiles(stream);
 
@@ -90,7 +89,7 @@ namespace AshleySeric.ScatterStream
                 }
             }
 
-            if (!stream.isRunningStreamingTasks && stream.contentModificationOwner == null)
+            if (!stream.isRunningStreamingTasks && stream.contentModificationLockOwner == null)
             {
                 // Load tile's in range if they haven't been already.
                 var cameraPositionLocalToStream = (stream.streamToWorld_Inverse * stream.camera.transform.localToWorldMatrix).GetPosition();
@@ -103,7 +102,7 @@ namespace AshleySeric.ScatterStream
 
         private async Task RunStreamingTasks(ScatterStream stream, float3 cameraPositionLocalToStream)
         {
-            stream.contentModificationOwner = this;
+            stream.contentModificationLockOwner = this;
             stream.isRunningStreamingTasks = true;
             var streamingDistance = stream.GetStreamingDistance();
 
@@ -119,7 +118,7 @@ namespace AshleySeric.ScatterStream
             LoadTilesInRange(stream);
             stream.localCameraPositionAtLastStream = cameraPositionLocalToStream;
             stream.isRunningStreamingTasks = false;
-            stream.contentModificationOwner = null;
+            stream.contentModificationLockOwner = null;
         }
 
         private async Task<NativeHashSet<TileCoords>> CollectTileCoordsInRange(float3 cameraPositionStreamSpace, float distance, ScatterStream stream)
@@ -180,11 +179,11 @@ namespace AshleySeric.ScatterStream
                 stream.totalTilesLoadedThisFrame++;
 
                 // Create a tile & setup necessary buffers.
-                var instances = new List<List<Matrix4x4>>(stream.presets.Presets.Length);
+                var instances = new List<List<Tile_InstancedRendering.RuntimeInstance>>(stream.presets.Presets.Length);
                 // Pre-populate the lists so we have indexes for each preset.
                 foreach (var item in stream.presets.Presets)
                 {
-                    instances.Add(new List<Matrix4x4>());
+                    instances.Add(new List<Tile_InstancedRendering.RuntimeInstance>());
                 }
 
                 // Create and register a new tile for instanced rendering.
@@ -195,13 +194,17 @@ namespace AshleySeric.ScatterStream
                 };
 
                 // Add each instance to this new tile.
-                Action<ScatterItemInstanceData> onInstanceLoaded = (instanceData) =>
+                void onInstanceLoaded(ScatterItemInstanceData instanceData)
                 {
                     if (instanceData.streamGuid == stream.id)
                     {
-                        instances[instanceData.presetIndex].Add((Matrix4x4)instanceData.localToStream);
+                        instances[instanceData.presetIndex].Add(new Tile_InstancedRendering.RuntimeInstance
+                        {
+                            colour = instanceData.colour,
+                            localToStream = instanceData.localToStream
+                        });
                     }
-                };
+                }
 
                 success = true;
                 await Task.Run(() =>
@@ -221,9 +224,9 @@ namespace AshleySeric.ScatterStream
                 tile.RenderBounds = await Tile.GetTileBounds_LocalToStream_Async(tile.instances, stream);
 
                 // Wait for anyone else to finish modifying content
-                if (stream.contentModificationOwner != null)
+                if (stream.contentModificationLockOwner != null)
                 {
-                    await UniTask.WaitUntil(() => stream.contentModificationOwner == null);
+                    await UniTask.WaitUntil(() => stream.contentModificationLockOwner == null);
                 }
 
                 stream.LoadedInstanceRenderingTiles.Add(coords, tile);
@@ -447,7 +450,7 @@ namespace AshleySeric.ScatterStream
 
         private async void ProcessDirtyTiles(ScatterStream stream)
         {
-            stream.contentModificationOwner = this;
+            stream.contentModificationLockOwner = this;
 
             try
             {
@@ -516,7 +519,7 @@ namespace AshleySeric.ScatterStream
                 Debug.LogError($"Something went wrong attempting to process dirty tile. {e}");
             }
 
-            stream.contentModificationOwner = null;
+            stream.contentModificationLockOwner = null;
         }
 
         private async Task SaveTileToDisk_InstancedRendering(ScatterStream stream, TileCoords tileCoords)
@@ -529,6 +532,24 @@ namespace AshleySeric.ScatterStream
 
             var fileName = stream.GetTileFilePath(tileCoords);
             var tileInstances = stream.LoadedInstanceRenderingTiles[tileCoords].instances;
+            var genericTileInstances = new List<List<GenericInstancePlacementData>>();
+            
+            // Convert instances into generic format for serialization.
+            foreach (var preset in tileInstances)
+            {
+                var list = new List<GenericInstancePlacementData>();
+                
+                foreach (var item in preset)
+                {
+                    list.Add(new GenericInstancePlacementData
+                    {
+                        localToStream = item.localToStream,
+                        colour = item.colour
+                    });
+                }
+                
+                genericTileInstances.Add(list);
+            }
 
             await Task.Run(async () =>
             {
@@ -548,7 +569,7 @@ namespace AshleySeric.ScatterStream
                         using (var writer = new BinaryWriter(writeStream))
                         {
                             await EncodeToTileCache(
-                                tileInstances,
+                                genericTileInstances,
                                 writer,
                                 stream.brushConfig.maxTileEncodeTimePerFrame,
                                 stream.brushConfig.maxTileEncodingItemsPerFrame);
@@ -589,7 +610,15 @@ namespace AshleySeric.ScatterStream
             }
         }
 
-        private static async Task EncodeToTileCache(List<List<Matrix4x4>> tileItemBuffer,
+        /// <summary>
+        /// Writes contents of a give tile's item buffer into binary.
+        /// </summary>
+        /// <param name="tileItemBuffer">Parent list index is the preset index</param>
+        /// <param name="writer"></param>
+        /// <param name="maxTimePerFrame"></param>
+        /// <param name="maxTileEncodingItemsPerFrame"></param>
+        /// <returns></returns>
+        public static async Task EncodeToTileCache(List<List<GenericInstancePlacementData>> tileItemBuffer,
                                                     BinaryWriter writer,
                                                     float maxTimePerFrame,
                                                     int maxTileEncodingItemsPerFrame)
@@ -606,10 +635,10 @@ namespace AshleySeric.ScatterStream
                 int instanceCount = tileItemBuffer[presetIndex].Count;
                 for (int instanceIndex = 0; instanceIndex < instanceCount; instanceIndex++)
                 {
-                    var m = tileItemBuffer[presetIndex][instanceIndex];
-                    var pos = m.GetPosition();
-                    var rot = m.GetRotation();
-                    var scale = m.GetScale();
+                    var inst = tileItemBuffer[presetIndex][instanceIndex];
+                    var pos = inst.localToStream.GetPosition();
+                    var rot = inst.localToStream.GetRotation();
+                    var scale = inst.localToStream.GetScale();
 
                     // Position
                     writer.Write(pos.x);
@@ -630,6 +659,12 @@ namespace AshleySeric.ScatterStream
                     // Preset index
                     writer.Write(presetIndex);
 
+                    // Colour
+                    writer.Write(inst.colour.x);
+                    writer.Write(inst.colour.y);
+                    writer.Write(inst.colour.z);
+                    writer.Write(inst.colour.w);
+
                     // Check if we should await a frame before continuing.
                     if (stopwatch.ElapsedMilliseconds > maxTimePerFrame || presetIndex > maxTileEncodingItemsPerFrame)
                     {
@@ -642,11 +677,11 @@ namespace AshleySeric.ScatterStream
             }
         }
 
-        private async Task EncodeToTileCache(Entity tileEntity,
-                                             DynamicBuffer<ScatterItemEntityBuffer> tileItemBuffer,
-                                             BinaryWriter writer,
-                                             float maxTimePerFrame,
-                                             int maxTileEncodingItemsPerFrame)
+        public async Task EncodeToTileCache(Entity tileEntity,
+                                            DynamicBuffer<ScatterItemEntityBuffer> tileItemBuffer,
+                                            BinaryWriter writer,
+                                            float maxTimePerFrame,
+                                            int maxTileEncodingItemsPerFrame)
         {
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             var translationFromEntity = GetComponentDataFromEntity<Translation>(true);
@@ -685,6 +720,13 @@ namespace AshleySeric.ScatterStream
                 // TODO: Swap this to order the list of transforms by prefab index so we don't have to store it for each item.
                 writer.Write(presetIndex);
 
+                // TODO: Implement colour support in ECS.
+                // Colour.
+                writer.Write(1f);
+                writer.Write(1f);
+                writer.Write(1f);
+                writer.Write(1f);
+
                 // TODO: Work out how to allow this await while remaining compatible with ecs calls.
                 // Checke if we should await a frame before continuing.
                 if (stopwatch.ElapsedMilliseconds > maxTimePerFrame || presetIndex > maxTileEncodingItemsPerFrame)
@@ -704,19 +746,19 @@ namespace AshleySeric.ScatterStream
             }
         }
 
-        private static bool LoadTileCache(BinaryReader reader,
-                                          ScatterStream stream,
-                                          Action<ScatterItemInstanceData> onItemLoaded)
+        public static bool LoadTileCache(BinaryReader reader,
+                                         ScatterStream stream,
+                                         Action<ScatterItemInstanceData> onItemLoaded)
         {
             try
             {
                 // File format version.
                 var formatVersion = reader.ReadInt32();
 
-                if (formatVersion != TILE_FILE_FORMAT_VERSION)
+                if (formatVersion > 3)
                 {
                     // We don't know how to deserialize this version, 
-                    // it might be newer than our build.
+                    // it's newer than this build.
                     return false;
                 }
 
@@ -748,11 +790,25 @@ namespace AshleySeric.ScatterStream
                     // Preset index.
                     var prefabIndex = reader.ReadInt32();
 
+                    float4 colour = default;
+
+                    if (formatVersion == 2)
+                    {
+                        // Colour.
+                        colour = new float4(
+                            reader.ReadSingle(),
+                            reader.ReadSingle(),
+                            reader.ReadSingle(),
+                            reader.ReadSingle()
+                        );
+                    }
+
                     onItemLoaded?.Invoke(new ScatterItemInstanceData
                     {
                         streamGuid = stream.id,
                         presetIndex = prefabIndex,
-                        localToStream = float4x4.TRS(pos, rot, scale)
+                        localToStream = float4x4.TRS(pos, rot, scale),
+                        colour = colour
                     });
                 }
 

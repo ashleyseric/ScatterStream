@@ -18,6 +18,7 @@ namespace AshleySeric.ScatterStream
     public class Painter : SystemBase
     {
         public static bool allowPlacementProcessing = true;
+        private const string PAINTING_LAYER_NAME = "Default";
 
         private static Camera brushCamera;
         private static RenderTexture brushRenderTexture;
@@ -40,19 +41,6 @@ namespace AshleySeric.ScatterStream
         {
             base.OnCreate();
             sim = World.DefaultGameObjectInjectionWorld.GetOrCreateSystem<EntityCommandBufferSystem>();
-
-            // TODO: Implement proper setup for brush render texture sampling.
-            // brushCamera = new GameObject("ScatterStream brush camera").AddComponent<Camera>();
-            // brushCamera.gameObject.hideFlags = HideFlags.DontSave;
-            // brushCamera.cullingMask = LayerMask.GetMask(PAINTING_LAYER_NAME);
-            // brushCamera.backgroundColor = Color.clear;
-
-            // brushRenderTexture = new RenderTexture(ScatterBrushConfig.Current.brushCameraResolution, ScatterBrushConfig.Current.brushCameraResolution, 0, UnityEngine.Experimental.Rendering.DefaultFormat.HDR);
-            // brushTargetTexture = new Texture2D(ScatterBrushConfig.Current.brushCameraResolution, ScatterBrushConfig.Current.brushCameraResolution);
-            // brushRenderTexture.antiAliasing = 4;
-            // brushCamera.targetTexture = brushRenderTexture;
-            // brushCamera.orthographic = true;
-            // brushCamera.enabled = false;
         }
 
         protected override void OnDestroy()
@@ -69,33 +57,33 @@ namespace AshleySeric.ScatterStream
                 {
                     strokeProcessingHandle = ProcessStrokes_Async();
                 }
-
-                // Process single placement queue.
-                while (pendingSinglePlacements.Count > 0)
-                {
-                    var data = pendingSinglePlacements.Dequeue();
-                    var stream = ScatterStream.ActiveStreams[data.streamId];
-
-                    switch (data.mode)
-                    {
-                        default:
-                        case PlacementMode.None:
-                            break;
-                        case PlacementMode.Add:
-                            PlaceSingleItem(stream, data);
-                            break;
-                        case PlacementMode.Delete:
-                            // TODO: Implement search and delete for the nearest item to the given location.
-                            break;
-                    }
-
-                    data.onProcessingComplete?.Invoke();
-                }
             }
         }
 
         private async Task ProcessStrokes_Async()
         {
+            // Process single placement queue.
+            while (pendingSinglePlacements.Count > 0)
+            {
+                var data = pendingSinglePlacements.Dequeue();
+                var stream = ScatterStream.ActiveStreams[data.streamId];
+
+                switch (data.mode)
+                {
+                    default:
+                    case PlacementMode.None:
+                        break;
+                    case PlacementMode.Add:
+                        PlaceSingleItem(stream, data);
+                        break;
+                    case PlacementMode.Delete:
+                        // TODO: Implement search and delete for the nearest item to the given location.
+                        break;
+                }
+
+                data.onProcessingComplete?.Invoke();
+            }
+
             var keys = new List<int>(strokeCountProcessedThisBatch.Keys);
             var tasks = new HashSet<Task>();
 
@@ -162,7 +150,7 @@ namespace AshleySeric.ScatterStream
             pendingSinglePlacements.Enqueue(placementData);
         }
 
-        private void PlaceSingleItem(ScatterStream stream, SinglePlacementData placementData)
+        public void PlaceSingleItem(ScatterStream stream, SinglePlacementData placementData)
         {
             // Capture variables for use within a job.
             var prefabEntity = stream.itemPrefabEntities[placementData.presetIndex];
@@ -173,7 +161,17 @@ namespace AshleySeric.ScatterStream
             switch (stream.renderingMode)
             {
                 case RenderingMode.DrawMeshInstanced:
-                    var tileCoords = SpawnScatterItemInstanceRendering(float4x4.TRS(placementData.position, placementData.rotation, placementData.scale), placementData.presetIndex, stream, Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix), tileWidth);
+                    var tileCoords = SpawnScatterItemInstanceRendering(
+                        worldSpaceInstance: new Tile_InstancedRendering.RuntimeInstance
+                        {
+                            localToStream = float4x4.TRS(placementData.position, placementData.rotation, placementData.scale),
+                            colour = placementData.colour
+                        },
+                        presetIndex: placementData.presetIndex,
+                        stream: stream,
+                        streamToWorldMatrix_Inverse: Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix),
+                        tileWidth: tileWidth
+                    );
                     stream.OnTileModified?.Invoke(tileCoords);
                     break;
                 case RenderingMode.Entities:
@@ -184,13 +182,8 @@ namespace AshleySeric.ScatterStream
                     var presetIndex = placementData.presetIndex;
 
                     // Place single item at hit point.
-                    Dependency = Job.WithCode(() =>
-                    {
-                        SpawnScatterItemECS(matrix, overlappingTiles, presetIndex, prefabEntity, streamGuid, tileWidth, buffer);
-                    }).Schedule(Dependency);
-                    Dependency.Complete();
+                    SpawnScatterItemECS(matrix, overlappingTiles, presetIndex, prefabEntity, streamGuid, tileWidth, buffer);
                     matrices.Dispose();
-
                     buffer.Playback(EntityManager);
                     buffer.Dispose();
                     overlappingTiles.Dispose();
@@ -222,13 +215,13 @@ namespace AshleySeric.ScatterStream
             var sqrDistance = brushRadius * brushRadius;
             var streamToWorld = stream.parentTransform.localToWorldMatrix;
 
-            if (stream.contentModificationOwner != null)
+            if (stream.contentModificationLockOwner != null)
             {
                 // Wait for anyone else to complete modifying the contents within this stream first.
-                await UniTask.WaitUntil(() => stream.contentModificationOwner == null);
+                await UniTask.WaitUntil(() => stream.contentModificationLockOwner == null);
             }
 
-            stream.contentModificationOwner = this;
+            stream.contentModificationLockOwner = this;
 
             try
             {
@@ -249,7 +242,7 @@ namespace AshleySeric.ScatterStream
                                 for (int j = countForThisPreset - 1; j >= 0; j--)
                                 {
                                     // Apply parent transform offset to each position before distance checking against the brush position.
-                                    if (math.distancesq((streamToWorld * instancesForThisPreset[j]).GetPosition(), brushState.position) < sqrDistance)
+                                    if (math.distancesq((streamToWorld * instancesForThisPreset[j].localToStream).GetPosition(), brushState.position) < sqrDistance)
                                     {
                                         instancesForThisPreset.RemoveAt(j);
                                         anyDeleted = true;
@@ -315,79 +308,100 @@ namespace AshleySeric.ScatterStream
                 Debug.LogError(e);
             }
 
-            stream.contentModificationOwner = null;
+            stream.contentModificationLockOwner = null;
         }
 
         private async Task ProcessBrush_Add(BrushPlacementData brushState, ScatterStream stream)
         {
-            var rotationOffset = stream.presets.Presets[brushState.presetIndex].rotationOffset.value;
-            NativeHashSet<float4x4> matricesToPlace = await GetBrushPlacementMatrices(stream.brushConfig, brushState.diameter, stream.presets.Presets[brushState.presetIndex].scaleMultiplier, rotationOffset, brushState);
-
-            // Capture variables for access in the job.
-            var scaleRange = stream.brushConfig.scaleRange;
-            var noiseScale = stream.brushConfig.noiseScale;
-            var renderingMode = stream.renderingMode;
-            var streamGuid = stream.id;
-            var tileWidth = stream.tileWidth;
-            var entityPrefab = stream.itemPrefabEntities[brushState.presetIndex];
-            var selPresetIndex = brushState.presetIndex;
-            var placementRotation = (quaternion)rotationOffset;
-            var streamToWorldMatrix_Inverse = Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix);
-
-            if (stream.contentModificationOwner != null)
+            try
             {
-                // Wait for anyone else to complete modifying the contents within this stream first.
-                await UniTask.WaitUntil(() => stream.contentModificationOwner == null);
-            }
+                var rotationOffset = stream.presets.Presets[brushState.presetIndex].rotationOffset.value;
+                var usingBrushCamera = stream.brushConfig.brushCameraTintStrength > 0;
 
-            stream.contentModificationOwner = this;
+                if (usingBrushCamera)
+                {
+                    RenderBrushCamera(brushState, stream.brushConfig);
+                }
 
-            // Place a single item.
-            switch (stream.renderingMode)
-            {
-                case RenderingMode.DrawMeshInstanced:
-                    var positionCount = matricesToPlace.Count();
-                    var matrices = matricesToPlace.ToNativeArray(Allocator.Persistent);
-                    var changedTiles = new HashSet<TileCoords>();
+                NativeHashSet<float4x4> matricesToPlace = await GetBrushPlacementMatrices(stream.brushConfig, brushState.diameter, stream.presets.Presets[brushState.presetIndex].scaleMultiplier, rotationOffset, brushState);
+                // Capture variables for access in the job.
+                var scaleRange = stream.brushConfig.scaleRange;
+                var noiseScale = stream.brushConfig.noiseScale;
+                var renderingMode = stream.renderingMode;
+                var streamGuid = stream.id;
+                var tileWidth = stream.tileWidth;
+                var entityPrefab = stream.itemPrefabEntities[brushState.presetIndex];
+                var selPresetIndex = brushState.presetIndex;
+                var placementRotation = (quaternion)rotationOffset;
+                var streamToWorldMatrix_Inverse = Matrix4x4.Inverse(stream.parentTransform.localToWorldMatrix);
 
-                    // Do the actual spawning back outside of the job.
-                    for (int i = 0; i < positionCount; i++)
-                    {
-                        //Debug.Log(rotations[i]);
-                        changedTiles.Add(SpawnScatterItemInstanceRendering(matrices[i], selPresetIndex, stream, streamToWorldMatrix_Inverse, tileWidth));
-                    }
+                if (stream.contentModificationLockOwner != null)
+                {
+                    // Wait for anyone else to complete modifying the contents within this stream first.
+                    await UniTask.WaitUntil(() => stream.contentModificationLockOwner == null);
+                }
 
-                    if (stream.OnTileModified != null)
-                    {
-                        foreach (var tileCoords in changedTiles)
+                stream.contentModificationLockOwner = this;
+
+                // Place a single item.
+                switch (stream.renderingMode)
+                {
+                    case RenderingMode.DrawMeshInstanced:
+                        var positionCount = matricesToPlace.Count();
+                        var matrices = matricesToPlace.ToNativeArray(Allocator.Persistent);
+                        var changedTiles = new HashSet<TileCoords>();
+                        var brushPixels = usingBrushCamera ? brushTargetTexture.GetPixels() : null;
+
+                        // Do the actual spawning back outside of the job.
+                        for (int i = 0; i < positionCount; i++)
                         {
-                            stream.OnTileModified(tileCoords);
+                            var instance = new Tile_InstancedRendering.RuntimeInstance
+                            {
+                                colour = usingBrushCamera ?
+                                    math.lerp(new float4(1f, 1f, 1f, 1f), GetBrushTexturePixel(matrices[i].GetPosition(), brushPixels), stream.brushConfig.brushCameraTintStrength) :
+                                    new float4(1f, 1f, 1f, 1f),
+                                localToStream = matrices[i]
+                            };
+
+                            changedTiles.Add(SpawnScatterItemInstanceRendering(instance, selPresetIndex, stream, streamToWorldMatrix_Inverse, tileWidth));
                         }
-                    }
 
-                    changedTiles.Clear();
-                    matrices.Dispose();
-                    break;
-                case RenderingMode.Entities:
-                    var spawnItemsBuffer = new EntityCommandBuffer(Allocator.TempJob);
-                    var overlappingTiles = GetOrCreateOverlappingTiles(matricesToPlace, stream);
-                    var positionsToPlaceEnumerator = matricesToPlace.GetEnumerator();
+                        if (stream.OnTileModified != null)
+                        {
+                            foreach (var tileCoords in changedTiles)
+                            {
+                                stream.OnTileModified(tileCoords);
+                            }
+                        }
 
-                    while (positionsToPlaceEnumerator.MoveNext())
-                    {
-                        SpawnScatterItemECS(positionsToPlaceEnumerator.Current, overlappingTiles, selPresetIndex, entityPrefab, streamGuid, tileWidth, spawnItemsBuffer);
-                    }
+                        changedTiles.Clear();
+                        matrices.Dispose();
+                        break;
+                    case RenderingMode.Entities:
+                        var spawnItemsBuffer = new EntityCommandBuffer(Allocator.TempJob);
+                        var overlappingTiles = GetOrCreateOverlappingTiles(matricesToPlace, stream);
+                        var positionsToPlaceEnumerator = matricesToPlace.GetEnumerator();
 
-                    sim.AddJobHandleForProducer(Dependency);
-                    Dependency.Complete();
-                    overlappingTiles.Dispose();
-                    spawnItemsBuffer.Playback(EntityManager);
-                    spawnItemsBuffer.Dispose();
-                    break;
+                        while (positionsToPlaceEnumerator.MoveNext())
+                        {
+                            SpawnScatterItemECS(positionsToPlaceEnumerator.Current, overlappingTiles, selPresetIndex, entityPrefab, streamGuid, tileWidth, spawnItemsBuffer);
+                        }
+
+                        sim.AddJobHandleForProducer(Dependency);
+                        Dependency.Complete();
+                        overlappingTiles.Dispose();
+                        spawnItemsBuffer.Playback(EntityManager);
+                        spawnItemsBuffer.Dispose();
+                        break;
+                }
+
+                stream.contentModificationLockOwner = null;
+                matricesToPlace.Dispose();
             }
-
-            stream.contentModificationOwner = null;
-            matricesToPlace.Dispose();
+            catch (System.Exception e)
+            {
+                Debug.LogError(e);
+            }
         }
 
         /// <summary>
@@ -405,7 +419,7 @@ namespace AshleySeric.ScatterStream
             var noiseScale = brush.noiseScale;
             var itemsPerRow = (int)math.ceil(diameter / brush.spacing);
             var maxCount = itemsPerRow * itemsPerRow; // Square grid.
-            var isUsingFilterPadding = brush.filters != null && brush.filters.Count > 0 && brush.filterPadding > 0 && !Mathf.Approximately(brush.filterPadding, 0f);
+            var isUsingFilterPadding = brush.filters != null && brush.enableFilters && brush.filters.Count > 0 && brush.filterPadding > 0 && !Mathf.Approximately(brush.filterPadding, 0f);
             var filterPrecision = isUsingFilterPadding ? brush.filterPrecision : 0;
 
             if (isUsingFilterPadding)
@@ -418,7 +432,7 @@ namespace AshleySeric.ScatterStream
             var raycastDir = -(float3)brushState.normal;
             var brushPosition = (float3)brushState.position;
 
-            // Need to switch to new physics system to use new math library/burst. https://docs.unity3d.com/Packages/com.unity.physics@0.0/manual/collision_queries.html
+            // TODO: Switch to new physics system using new math library/burst. https://docs.unity3d.com/Packages/com.unity.physics@0.0/manual/collision_queries.html
             // Work out brush scattering positions across parallel theads.
             var commandsRaw = await GetBrushPositionsJob.GetBrushRawRaycastCommands(
                 itemsPerRow: itemsPerRow,
@@ -521,14 +535,16 @@ namespace AshleySeric.ScatterStream
         /// <param name="presetIndex"></param>
         /// <param name="stream"></param>
         /// <param name="commandBuffer"></param>
-        private static TileCoords SpawnScatterItemInstanceRendering(float4x4 matrix,
+        public static TileCoords SpawnScatterItemInstanceRendering(Tile_InstancedRendering.RuntimeInstance worldSpaceInstance,
                                                                     int presetIndex,
                                                                     ScatterStream stream,
                                                                     float4x4 streamToWorldMatrix_Inverse,
                                                                     float tileWidth)
         {
-            var itemMatrixLocalToStream = math.mul(streamToWorldMatrix_Inverse, matrix);
-            var tileCoords = Tile.GetGridTileIndex(itemMatrixLocalToStream.GetPosition(), tileWidth);
+            // Convert from world space to stream space.
+            var streamSpaceInstance = worldSpaceInstance;
+            streamSpaceInstance.localToStream = math.mul(streamToWorldMatrix_Inverse, worldSpaceInstance.localToStream);
+            var tileCoords = Tile.GetGridTileIndex(streamSpaceInstance.localToStream.GetPosition(), tileWidth);
             Tile_InstancedRendering tile = default;
 
             if (!stream.LoadedInstanceRenderingTiles.ContainsKey(tileCoords))
@@ -536,7 +552,7 @@ namespace AshleySeric.ScatterStream
                 tile = new Tile_InstancedRendering
                 {
                     coords = tileCoords,
-                    instances = new List<List<Matrix4x4>>(),
+                    instances = new List<List<Tile_InstancedRendering.RuntimeInstance>>(),
                     RenderBounds = Tile.GetTileBounds(tileCoords, stream.tileWidth, stream.tileWidth * 0.5f)
                 };
                 // Add this tile as no other scatter items have been placed on it yet.
@@ -550,11 +566,11 @@ namespace AshleySeric.ScatterStream
             // Ensure matrix list for this preset index exists before trying to populate it's list.
             while (tile.instances.Count < stream.presets.Presets.Length)
             {
-                tile.instances.Add(new List<Matrix4x4>());
+                tile.instances.Add(new List<Tile_InstancedRendering.RuntimeInstance>());
             }
 
-            stream.LoadedInstanceRenderingTiles[tileCoords].instances[presetIndex].Add(itemMatrixLocalToStream);
-            tile.instances[presetIndex].Add((Matrix4x4)(math.mul(streamToWorldMatrix_Inverse, matrix)));
+            stream.LoadedInstanceRenderingTiles[tileCoords].instances[presetIndex].Add(streamSpaceInstance);
+            tile.instances[presetIndex].Add(streamSpaceInstance);
             stream.dirtyInstancedRenderingTiles.Add(tileCoords);
             stream.areInstancedRenderingSortedBuffersDirty = true;
             return tile.coords;
@@ -590,12 +606,28 @@ namespace AshleySeric.ScatterStream
             commandBuffer.AddComponent(tileEntity, new DirtyTag());
         }
 
-        private void RenderBrushCamera(RaycastHit mouseHit, int rowCount, int total, float spacing, float brushRadius)
+        private void RenderBrushCamera(BrushPlacementData placementData, ScatterBrush brush)
         {
             // Lift camera a meter higher and offset clipping planes by 1m to account.
             float nearClipOffset = 5;
-            brushCamera.transform.position = mouseHit.point + (mouseHit.normal * (brushRadius + nearClipOffset));
-            brushCamera.transform.forward = -mouseHit.normal;
+            float brushRadius = placementData.diameter * 0.5f;
+
+            if (brushCamera == null)
+            {
+                brushCamera = new GameObject("ScatterStream brush camera").AddComponent<Camera>();
+                brushCamera.gameObject.hideFlags = HideFlags.DontSave;
+                brushCamera.cullingMask = LayerMask.GetMask(PAINTING_LAYER_NAME);
+                brushCamera.backgroundColor = Color.clear;
+                brushRenderTexture = new RenderTexture(brush.brushCameraResolution, brush.brushCameraResolution, 0, UnityEngine.Experimental.Rendering.DefaultFormat.HDR);
+                brushTargetTexture = new Texture2D(brush.brushCameraResolution, brush.brushCameraResolution);
+                brushRenderTexture.antiAliasing = 4;
+                brushCamera.targetTexture = brushRenderTexture;
+                brushCamera.orthographic = true;
+                brushCamera.enabled = false;
+            }
+
+            brushCamera.transform.position = placementData.position + (placementData.normal * (brushRadius + nearClipOffset));
+            brushCamera.transform.forward = -placementData.normal;
             brushCamera.orthographicSize = brushRadius;
             brushCamera.nearClipPlane = nearClipOffset;
             brushCamera.farClipPlane = (brushRadius * 2f) + nearClipOffset;
@@ -611,6 +643,13 @@ namespace AshleySeric.ScatterStream
         {
             var pos = camera.WorldToScreenPoint(position);
             return new int2(Mathf.FloorToInt(pos.x), Mathf.FloorToInt(pos.y));
+        }
+
+        private float4 GetBrushTexturePixel(Vector3 position, Color[] pixels)
+        {
+            int2 index = GetBrushTexturePixelIndex(position, brushCamera);
+            var pixel = pixels[index.y * Mathf.FloorToInt(index.x) + index.x];
+            return new float4(pixel.r, pixel.g, pixel.b, pixel.a);
         }
 
         public static RaycastHit RaycastMouseIntoScreen(ScatterStream stream)

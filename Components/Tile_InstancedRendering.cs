@@ -9,6 +9,15 @@ namespace AshleySeric.ScatterStream
 {
     public class Tile_InstancedRendering : IEquatable<Tile_InstancedRendering>
     {
+        /// <summary>
+        /// Instance type for use at runtime with values that are modified procedurally over time.
+        /// </summary>
+        public struct RuntimeInstance
+        {
+            public Matrix4x4 localToStream;
+            public float4 colour;
+        }
+
         public TileCoords coords;
         /// <summary>
         /// Combined AABB bounds of each instances' meshes.
@@ -17,13 +26,17 @@ namespace AshleySeric.ScatterStream
         /// <summary>
         /// Parent list index: Preset index.
         /// </summary>
-        public List<List<Matrix4x4>> instances;
+        public List<List<RuntimeInstance>> instances;
         /// <summary>
         /// Parent list index: Preset index.
         /// Second level index: LOD index.
         /// </summary>
-        public List<List<List<Matrix4x4>>> lodSortedInstances;
-        public List<List<List<Matrix4x4>>> lodSortedInstancesRenderBuffer;
+        public List<List<List<RuntimeInstance>>> lodSortedInstances;
+        /// <summary>
+        /// Parent list index: Preset index.
+        /// Second level index: LOD index.
+        /// </summary>
+        public List<List<List<RuntimeInstance>>> lodSortedInstancesRenderBuffer;
 
         public bool Equals(Tile_InstancedRendering other)
         {

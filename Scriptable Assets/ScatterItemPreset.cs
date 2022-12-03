@@ -205,11 +205,7 @@ namespace AshleySeric.ScatterStream
             #region Upright Facing Quad
 
             // Combine all first LOD bounds.
-            var bounds = preset.levelsOfDetail[0].renderables[0].mesh.bounds;
-            for (int i = 0; i < renderableCount; i++)
-            {
-                bounds.Encapsulate(preset.levelsOfDetail[0].renderables[0].mesh.bounds);
-            }
+            var bounds = preset.GetBounds();
 
             // Set height based on the available width for each upright.
             var largestHorizontalExtent = math.max(bounds.extents.x, bounds.extents.z);
@@ -421,7 +417,7 @@ namespace AshleySeric.ScatterStream
 
             var billboardMaterial = CoreUtils.CreateEngineMaterial(ShaderConstants.BILLBOARD_SHADER_NAME);
             billboardMaterial.enableInstancing = true;
-            billboardMaterial.SetTexture(ShaderConstants.BILLBOARD_TEXTURE_PROP, billboardTexture);
+            billboardMaterial.SetTexture(ShaderConstants.BILLBOARD_TEXTURE, billboardTexture);
 
 #if UNITY_EDITOR
             if (Application.isPlaying)
@@ -478,6 +474,21 @@ namespace AshleySeric.ScatterStream
             }
 
             return new Vector3(total.x / length, total.y / length, total.z / length);
+        }
+
+        public Bounds GetBounds()
+        {
+            var result = new Bounds(levelsOfDetail[0].renderables[0].mesh.bounds.center, Vector3.zero);
+
+            foreach (var lod in levelsOfDetail)
+            {
+                foreach (var r in lod.renderables)
+                {
+                    result.Encapsulate(r.mesh.bounds);
+                }
+            }
+
+            return result;
         }
     }
 
@@ -542,7 +553,7 @@ namespace AshleySeric.ScatterStream
                     // Cheeky trick using an empty label to get a rect for DrawPreviewTexture
                     // that plays nicely with EditorGUiLayout auto layout adjustments.
                     EditorGUILayout.LabelField("", GUILayout.Height(256), GUILayout.Width(256));
-                    
+
                     if (preset.billboardTexture != null)
                     {
                         EditorGUI.DrawPreviewTexture(GUILayoutUtility.GetLastRect(), preset.billboardTexture);

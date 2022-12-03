@@ -15,6 +15,8 @@ namespace AshleySeric.ScatterStream
         /// </summary>
         public float spacing = 0.75f;
         public float diameter = 50f;
+        [Range(0f, 1f)]
+        public float brushCameraTintStrength = 0.75f;
         public int brushCameraResolution = 256;
         /// <summary>
         /// Multiplier of <see="diameter"> distance to move in a stroke before applying the brush again.

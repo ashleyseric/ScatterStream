@@ -58,7 +58,7 @@ namespace AshleySeric.ScatterStream
             };
         }
 
-        public static async Task<AABB> GetTileBounds_LocalToStream_Async(List<List<Matrix4x4>> instancesInTile, ScatterStream stream)
+        public static async Task<AABB> GetTileBounds_LocalToStream_Async(List<List<Tile_InstancedRendering.RuntimeInstance>> instancesInTile, ScatterStream stream)
         {
             var presetRenderableBounds = new List<List<AABB>>();
             int presetIndex = 0;
@@ -86,7 +86,7 @@ namespace AshleySeric.ScatterStream
             {
                 if (presetInstances.Count > 0)
                 {
-                    pos = presetInstances[0].GetPosition();
+                    pos = presetInstances[0].localToStream.GetPosition();
                     break;
                 }
             }
@@ -111,7 +111,7 @@ namespace AshleySeric.ScatterStream
                         // Only consider renderables in the closest lod for performance.
                         for (int i = 0; i < preset.levelsOfDetail[0].renderables.Count; i++)
                         {
-                            tileMinMax.Encapsulate(AABB.Transform(instance, closestRenderableBounds[i]));
+                            tileMinMax.Encapsulate(AABB.Transform(instance.localToStream, closestRenderableBounds[i]));
                         }
                     }
 
@@ -122,7 +122,7 @@ namespace AshleySeric.ScatterStream
             return tileMinMax;
         }
 
-        public static AABB GetTileBounds_LocalToStream(List<List<Matrix4x4>> instancesInTile, ScatterStream stream)
+        public static AABB GetTileBounds_LocalToStream(List<List<Tile_InstancedRendering.RuntimeInstance>> instancesInTile, ScatterStream stream)
         {
             var pos = float3.zero;
 
@@ -130,7 +130,7 @@ namespace AshleySeric.ScatterStream
             {
                 if (presetInstances.Count > 0)
                 {
-                    pos = presetInstances[0].GetPosition();
+                    pos = presetInstances[0].localToStream.GetPosition();
                     break;
                 }
             }
@@ -152,7 +152,7 @@ namespace AshleySeric.ScatterStream
                     // Only consider renderables in the closest lod for performance.
                     foreach (var renderable in preset.levelsOfDetail[0].renderables)
                     {
-                        minMax.Encapsulate(AABB.Transform(instance, renderable.mesh.bounds.ToAABB()));
+                        minMax.Encapsulate(AABB.Transform(instance.localToStream, renderable.mesh.bounds.ToAABB()));
                     }
                 }
 

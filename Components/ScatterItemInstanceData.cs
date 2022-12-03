@@ -11,6 +11,7 @@ namespace AshleySeric.ScatterStream
         public int streamGuid;
         public int presetIndex;
         public float4x4 localToStream;
+        public float4 colour;
 
         /// <summary>
         /// Size in bytes of a single ScatterItemInstanceData.
@@ -18,8 +19,10 @@ namespace AshleySeric.ScatterStream
         /// <returns></returns>
         public static int Size()
         {
-            return sizeof(int) +    // prefabIndex
-            sizeof(float) * 4 * 4;  // transformMatrix
+            return 
+                sizeof(int) +           // prefabIndex
+                sizeof(float) * 4 +     // Colour
+                sizeof(float) * 4 * 4;  // transformMatrix
         }
 
         public bool Equals(ScatterItemInstanceData other)

@@ -70,7 +70,7 @@ namespace AshleySeric.ScatterStream
         [NonSerialized] public Matrix4x4 previousFrameStreamToWorld;
         [NonSerialized] public List<Entity> itemPrefabEntities = new List<Entity>();
         [NonSerialized] public bool isRunningStreamingTasks = false;
-        [NonSerialized] public volatile object contentModificationOwner = null;
+        [NonSerialized] public volatile object contentModificationLockOwner = null;
         [NonSerialized] public int totalTilesLoadedThisFrame = 0;
 
         /// <summary>
@@ -175,14 +175,23 @@ namespace AshleySeric.ScatterStream
                         cacheFolderDirectPath = cacheDirectoryPath.Replace('\\', '/');
                         break;
                 }
+
                 Directory.CreateDirectory(cacheFolderDirectPath);
             }
+
             return Path.Combine(cacheFolderDirectPath, name);
         }
 
-        public string GetTileFilePath(TileCoords coords)
+        public string GetTileFilePath(TileCoords coords, bool ensureDirectoryExists = false)
         {
-            return Path.Combine(GetTileDirectory(), Mathf.FloorToInt(coords.x) + "_" + Mathf.FloorToInt(coords.y) + TILE_CACHE_EXTENSION);
+            var dir = GetTileDirectory();
+
+            if (ensureDirectoryExists)
+            {
+                Directory.CreateDirectory(dir);
+            }
+
+            return Path.Combine(dir, Mathf.FloorToInt(coords.x) + "_" + Mathf.FloorToInt(coords.y) + TILE_CACHE_EXTENSION);
         }
 
         public bool HasStreamMovedSinceLastFrame()
@@ -221,6 +230,7 @@ namespace AshleySeric.ScatterStream
 
             // Remove any ECS spawned items for this strema.
             var streamer = World.DefaultGameObjectInjectionWorld?.GetExistingSystem<TileStreamer>();
+
             if (streamer != null)
             {
                 streamer.UnloadTilesOutOfRange(this);

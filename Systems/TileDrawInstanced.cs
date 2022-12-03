@@ -19,7 +19,7 @@ namespace AshleySeric.ScatterStream
         public static bool drawDebugs = false;
 
         private readonly static Matrix4x4[] finalRenderMatrixBuffer = new Matrix4x4[1023];
-        private List<Matrix4x4> instanceBuffer = new List<Matrix4x4>();
+        private List<Tile_InstancedRendering.RuntimeInstance> instanceBuffer = new List<Tile_InstancedRendering.RuntimeInstance>();
         float3[] viewFrustumCheck_TileCorners = new float3[8];
 
         private Mesh debugCubeMesh;
@@ -38,7 +38,7 @@ namespace AshleySeric.ScatterStream
 
             foreach (var streamKvp in ScatterStream.ActiveStreams)
             {
-                SortForInstancedRenderingIfNeeded(streamKvp.Value);
+                SortForInstancedRenderingIfNeededAsync(streamKvp.Value);
                 // Draw each instance in batches.
                 RenderWithDrawMeshInstanced(streamKvp.Value);
             }
@@ -53,7 +53,7 @@ namespace AshleySeric.ScatterStream
         /// Run threaded tasks to sort instances on each tile to re-structure data for batched rendering based on LOD distances.
         /// </summary>
         /// <returns></returns>
-        private void SortForInstancedRenderingIfNeeded(ScatterStream stream)
+        private void SortForInstancedRenderingIfNeededAsync(ScatterStream stream)
         {
             // Only sort stream if the camera has moved past it's refresh threshold.
             if (!stream.isStreamSortingInstancedRenderingBuffer &&
@@ -76,17 +76,18 @@ namespace AshleySeric.ScatterStream
         {
             foreach (var streamKvp in ScatterStream.ActiveStreams)
             {
-                if (streamKvp.Value.isRenderBufferReadyForSwap && streamKvp.Value.contentModificationOwner == null)
+                if (streamKvp.Value.isRenderBufferReadyForSwap && streamKvp.Value.contentModificationLockOwner == null)
                 {
-                    streamKvp.Value.contentModificationOwner = this;
+                    streamKvp.Value.contentModificationLockOwner = this;
+
                     foreach (var tileKvp in streamKvp.Value.LoadedInstanceRenderingTiles)
                     {
                         var tile = tileKvp.Value;
                         tile.lodSortedInstancesRenderBuffer = tile.lodSortedInstances;
-                        tile.lodSortedInstances = new List<List<List<Matrix4x4>>>();
+                        tile.lodSortedInstances = new List<List<List<Tile_InstancedRendering.RuntimeInstance>>>();
                     }
                     streamKvp.Value.isRenderBufferReadyForSwap = false;
-                    streamKvp.Value.contentModificationOwner = null;
+                    streamKvp.Value.contentModificationLockOwner = null;
                 }
             }
         }
@@ -108,7 +109,7 @@ namespace AshleySeric.ScatterStream
             // Create a copy as the collection may be modified while we're processing it.
             var tiles = new HashSet<Tile_InstancedRendering>(stream.LoadedInstanceRenderingTiles.Values);
 
-            stream.sortingTasks.Add(UniTask.Run(() =>
+            stream.sortingTasks.Add(UniTask.RunOnThreadPool(() =>
             {
                 foreach (var tile in tiles)
                 {
@@ -116,7 +117,7 @@ namespace AshleySeric.ScatterStream
                     {
                         if (tile.lodSortedInstances == null)
                         {
-                            tile.lodSortedInstances = new List<List<List<Matrix4x4>>>();
+                            tile.lodSortedInstances = new List<List<List<Tile_InstancedRendering.RuntimeInstance>>>();
                         }
 
                         var lodCount = 0;
@@ -125,20 +126,21 @@ namespace AshleySeric.ScatterStream
                         int presetIndex = 0;
                         float distSqr = 0;
 
-                        Matrix4x4 instanceMatrix;
-                        List<List<Matrix4x4>> lodSortedInstancesForThisPreset = null;
-                        List<Matrix4x4> instances = null;
+                        Tile_InstancedRendering.RuntimeInstance instance;
+                        List<List<Tile_InstancedRendering.RuntimeInstance>> lodSortedInstancesForThisPreset = null;
+                        List<Tile_InstancedRendering.RuntimeInstance> instances = null;
 
                         // Remove any preset entries in sorted lists if needed.
                         while (tile.lodSortedInstances.Count > presetCount)
                         {
-                            tile.lodSortedInstances.RemoveAt(tile.lodSortedInstances.Count - 1);
+                            int index = tile.lodSortedInstances.Count - 1;
+                            tile.lodSortedInstances.RemoveAt(index);
                         }
 
                         // Add more preset entries in sorted lists if needed.
                         while (tile.lodSortedInstances.Count < presetCount)
                         {
-                            tile.lodSortedInstances.Add(new List<List<Matrix4x4>>());
+                            tile.lodSortedInstances.Add(new List<List<Tile_InstancedRendering.RuntimeInstance>>());
                         }
 
                         // Remove any preset entries in unsorted instance lists if needed.
@@ -150,11 +152,12 @@ namespace AshleySeric.ScatterStream
                         // Add more preset entries in unsorted instance lists if needed.
                         while (tile.instances.Count < presetCount)
                         {
-                            tile.instances.Add(new List<Matrix4x4>());
+                            tile.instances.Add(new List<Tile_InstancedRendering.RuntimeInstance>());
                         }
 
                         // Check the min/max distance to this tile.
                         var tileRangeSqr = Tile.DistanceCheckTileSqr(tile.RenderBounds, cameraPosition, streamToWorld);
+                        var entireTileLodLevels = new HashSet<int>();
 
                         foreach (var preset in stream.presets.Presets)
                         {
@@ -179,21 +182,21 @@ namespace AshleySeric.ScatterStream
                             lodSortedInstancesForThisPreset = tile.lodSortedInstances[presetIndex];
 
                             // Remove any lod level lists if needed.
-                            while (tile.lodSortedInstances[presetIndex].Count > lodCount)
+                            while (lodSortedInstancesForThisPreset.Count > lodCount)
                             {
-                                tile.lodSortedInstances[presetIndex].RemoveAt(tile.lodSortedInstances[presetIndex].Count - 1);
+                                lodSortedInstancesForThisPreset.RemoveAt(lodSortedInstancesForThisPreset.Count - 1);
                             }
 
                             // Add more lod level lists if needed.
-                            while (tile.lodSortedInstances[presetIndex].Count < lodCount)
+                            while (lodSortedInstancesForThisPreset.Count < lodCount)
                             {
-                                tile.lodSortedInstances[presetIndex].Add(new List<Matrix4x4>());
+                                lodSortedInstancesForThisPreset.Add(new List<Tile_InstancedRendering.RuntimeInstance>());
                             }
 
                             // Clear matrix list for each lod ready to be re-populated.
                             for (int lodIndex = 0; lodIndex < lodCount; lodIndex++)
                             {
-                                tile.lodSortedInstances[presetIndex][lodIndex].Clear();
+                                lodSortedInstancesForThisPreset[lodIndex].Clear();
                             }
 
                             int entireTileLodLevel = -1;
@@ -231,11 +234,16 @@ namespace AshleySeric.ScatterStream
                             {
                                 for (int instanceIndex = 0; instanceIndex < instances.Count; instanceIndex++)
                                 {
-                                    instanceMatrix = instances[instanceIndex];
+                                    instance = instances[instanceIndex];
 
                                     if (!ShouldSkipThisInstance(preset.levelsOfDetail[entireTileLodLevel].densityMultiplier, instanceIndex, instanceCount))
                                     {
-                                        lodSortedInstancesForThisPreset[entireTileLodLevel].Add(instanceMatrix);
+                                        if (lodSortedInstancesForThisPreset.Count <= entireTileLodLevel)
+                                        {
+                                            lodSortedInstancesForThisPreset.Add(new List<Tile_InstancedRendering.RuntimeInstance>());
+                                        }
+
+                                        lodSortedInstancesForThisPreset[entireTileLodLevel].Add(instance);
                                     }
                                 }
                             }
@@ -243,8 +251,9 @@ namespace AshleySeric.ScatterStream
                             {
                                 for (int instanceIndex = 0; instanceIndex < instances.Count; instanceIndex++)
                                 {
-                                    instanceMatrix = instances[instanceIndex];
-                                    distSqr = math.distancesq(cameraPosition, (streamToWorld * instanceMatrix).GetPosition());
+                                    instance = instances[instanceIndex];
+                                    // TODO: Automatically account for the distance to the farthest point on the bounds of this instance here.
+                                    distSqr = math.distancesq(cameraPosition, (streamToWorld * instance.localToStream).GetPosition());
 
                                     // Work out which LOD index this item should be at and put it in the relevant list.
                                     for (int lodIndex = 0; lodIndex < lodCount; lodIndex++)
@@ -257,7 +266,7 @@ namespace AshleySeric.ScatterStream
                                         {
                                             if (!ShouldSkipThisInstance(preset.levelsOfDetail[lodIndex].densityMultiplier, instanceIndex, instanceCount))
                                             {
-                                                lodSortedInstancesForThisPreset[lodIndex].Add(instanceMatrix);
+                                                lodSortedInstancesForThisPreset[lodIndex].Add(instance);
                                             }
 
                                             break;
@@ -361,17 +370,20 @@ namespace AshleySeric.ScatterStream
 
                 for (int presetIndex = 0; presetIndex < tile.lodSortedInstancesRenderBuffer.Count; presetIndex++)
                 {
-                    List<List<Matrix4x4>> presetLods = tile.lodSortedInstancesRenderBuffer[presetIndex];
+                    List<List<Tile_InstancedRendering.RuntimeInstance>> presetLods = tile.lodSortedInstancesRenderBuffer[presetIndex];
                     int lodCount = presetLods.Count;
 
                     for (int lodIndex = 0; lodIndex < lodCount; lodIndex++)
                     {
                         instanceBuffer.Clear();
 
-                        foreach (var scatterItemMatrix in presetLods[lodIndex])
+                        for (int i = 0; i < presetLods[lodIndex].Count; i++)
                         {
+                            var inst = presetLods[lodIndex][i];
+                            presetLods[lodIndex][i] = inst;
                             // Apply the parent transform.
-                            instanceBuffer.Add(stream.streamToWorld * scatterItemMatrix);
+                            inst.localToStream = stream.streamToWorld * inst.localToStream;
+                            instanceBuffer.Add(inst);
                         }
 
                         var renderables = stream.presets.Presets[presetIndex].levelsOfDetail[lodIndex].renderables;
@@ -386,12 +398,14 @@ namespace AshleySeric.ScatterStream
             }
         }
 
-        public void RenderWithDrawMeshInstanced(in List<Matrix4x4> instances, ScatterRenderable renderable)
+        public void RenderWithDrawMeshInstanced(in List<Tile_InstancedRendering.RuntimeInstance> instances, ScatterRenderable renderable)
         {
             int indexInFinalBuffer = 0;
             int instanceIndex = 0;
             int instanceCount = instances.Count;
             int materialCount = renderable.materials.Length;
+            var propBlock = new MaterialPropertyBlock();
+            var colors = new List<Vector4>(1024);
 
             // Render all instances in batches of 1023 (limitation of Graphics.DrawMeshInstanced).
             while (instanceIndex < instanceCount)
@@ -399,9 +413,14 @@ namespace AshleySeric.ScatterStream
                 for (int i = instanceIndex; i < instanceCount && indexInFinalBuffer < 1023; i++, instanceIndex++, indexInFinalBuffer++)
                 {
                     // TODO: This is causing String.memcpy calls as a Matrix4x4 is more than 40 bytes.
-                    //       Need to investigate alternative ways of batching render calls.
-                    finalRenderMatrixBuffer[indexInFinalBuffer] = instances[i];
+                    //       Need to swap over to DrawMeshInstancedIndirect to bypass the 1023 limitation.
+                    //       This would also allow easily using compute shaders to sort the instances.
+                    finalRenderMatrixBuffer[indexInFinalBuffer] = instances[i].localToStream;
+                    colors.Add(instances[i].colour);
                 }
+
+                propBlock.SetVectorArray(ShaderConstants.INSTANCE_COLOUR, colors);
+                colors.Clear();
 
                 for (int j = 0; j < materialCount; j++)
                 {
@@ -410,7 +429,7 @@ namespace AshleySeric.ScatterStream
                                                material: renderable.materials[j],
                                                matrices: finalRenderMatrixBuffer,
                                                count: indexInFinalBuffer,
-                                               properties: null,
+                                               properties: propBlock,
                                                castShadows: renderable.shadowCastMode,
                                                receiveShadows: renderable.receiveShadows,
                                                layer: renderable.layer);

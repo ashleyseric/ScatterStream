@@ -13,6 +13,7 @@ namespace AshleySeric.ScatterStream
         public PlacementMode mode;
         public int streamId;
         public int presetIndex;
+        public float4 colour;
         public Action onProcessingComplete;
     }
 }
