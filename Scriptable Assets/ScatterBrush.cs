@@ -31,6 +31,7 @@ namespace AshleySeric.ScatterStream
         public float positionNoiseStrength = 0f;
         public bool conformBrushToSurface = false;
         public bool randomiseYRotation = true;
+        public bool enableFilters = false;
         /// <summary>
         /// How close to a forbidden surface can items be placed.
         /// </summary>

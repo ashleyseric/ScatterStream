@@ -44,6 +44,7 @@ namespace AshleySeric.ScatterStream
                 int hitCount = 0;
                 int chunkSizePerItem = 1 + filterPrecision;
                 var filteredHits = raycastHits.ToArray();
+                var usingFilters = brush.enableFilters && brush.filters != null && brush.filters.Count != 0;
 
                 // Pre-cache collider names by raycast hit for lookup within the thread.
                 // This is to avoid threading incompatibility with unity's RaycastHit.collider getter.
@@ -65,98 +66,105 @@ namespace AshleySeric.ScatterStream
 
                 var caseAdjustedFilterKeys = new string[brush.filters.Count];
 
-                // TODO: Move this region into a Job or thread to avoid converting to/from a managed arrays.
-                //       Need to decide on best way to handle strings in Jobs.
+                // TODO: Move this region into a Job to avoid converting to/from a managed arrays.
+                //       Need to decide on best way to handle strings in Jobs for compatibility with certain unity versions.
                 #region MOVE TO JOB
 
-                await Task.Run(() =>
+                if (usingFilters)
                 {
-                    // Pre-collect adjusted filter key strings to avoid duplicate allocations within the hits loop.
-                    for (int i = 0; i < brush.filters.Count; i++)
+                    await Task.Run(() =>
                     {
-                        if (brush.filters[i] == null)
+                        // Pre-collect adjusted filter key strings to avoid duplicate allocations within the hits loop.
+                        for (int i = 0; i < brush.filters.Count; i++)
                         {
-                            caseAdjustedFilterKeys[i] = null;
-                        }
-                        else
-                        {
-                            caseAdjustedFilterKeys[i] = brush.filters[i].isCaseSensitive ? brush.filters[i].filterKey : brush.filters[i].filterKey.ToLower();
-                        }
-                    }
-
-                    // Work out which hits pass all the placement filters.
-                    for (int indexAtItemChunkStart = 0; indexAtItemChunkStart < filteredHits.Length; indexAtItemChunkStart += chunkSizePerItem)
-                    {
-                        bool anyFailed = false;
-
-                        // Chunks may include extra raycasts that will form a ring around 
-                        // each hit point to check if it's within the filter padding.
-                        for (int i = 0; i < chunkSizePerItem; i++)
-                        {
-                            Collider col = colliders[indexAtItemChunkStart + i];
-
-                            // Ray didn't hit anything.
-                            if (col == null)
+                            if (brush.filters[i] == null)
                             {
-                                anyFailed = true;
-                                goto EndOfItemChunk;
+                                caseAdjustedFilterKeys[i] = null;
                             }
-
-                            // Consider this item passed if we have no placement filters on 
-                            // this brush or the padding ray didn't hit anything.
-                            if (brush.filters.Count == 0)
+                            else
                             {
-                                continue;
+                                caseAdjustedFilterKeys[i] = brush.filters[i].isCaseSensitive ? brush.filters[i].filterKey : brush.filters[i].filterKey.ToLower();
                             }
+                        }
 
-                            // Retrieve pre-cached collider name variants.
-                            var (colliderName, colliderNameLower) = colliderNames.ContainsKey(col) ? colliderNames[col] : (null, null);
+                        // Work out which hits pass all the placement filters.
+                        for (int indexAtItemChunkStart = 0; indexAtItemChunkStart < filteredHits.Length; indexAtItemChunkStart += chunkSizePerItem)
+                        {
+                            bool anyFailed = false;
 
-                            // Test against each filter in the stack.
-                            for (int filterIndex = 0; filterIndex < brush.filters.Count; filterIndex++)
+                            // Chunks may include extra raycasts that will form a ring around 
+                            // each hit point to check if it's within the filter padding.
+                            for (int i = 0; i < chunkSizePerItem; i++)
                             {
-                                // Consider it passed for null filters.
-                                if (caseAdjustedFilterKeys[filterIndex] != null)
+                                Collider col = colliders[indexAtItemChunkStart + i];
+
+                                // Ray didn't hit anything.
+                                if (col == null)
                                 {
-                                    var filter = brush.filters[filterIndex];
-                                    var passesFilter = false;
+                                    anyFailed = true;
+                                    goto EndOfItemChunk;
+                                }
 
-                                    switch (filter.nameFilterMethod)
-                                    {
-                                        case ScatterFilter.NameFilterMethod.Contains:
-                                            passesFilter = filter.isCaseSensitive ? colliderName.Contains(caseAdjustedFilterKeys[filterIndex]) : colliderNameLower.Contains(caseAdjustedFilterKeys[filterIndex]);
-                                            break;
-                                        case ScatterFilter.NameFilterMethod.DoesNotContain:
-                                            passesFilter = filter.isCaseSensitive ? !colliderName.Contains(caseAdjustedFilterKeys[filterIndex]) : !colliderNameLower.Contains(caseAdjustedFilterKeys[filterIndex]);
-                                            break;
-                                        case ScatterFilter.NameFilterMethod.ExactMatch:
-                                            passesFilter = filter.isCaseSensitive ? colliderName.Equals(caseAdjustedFilterKeys[filterIndex]) : colliderNameLower.Equals(caseAdjustedFilterKeys[filterIndex]);
-                                            break;
-                                    }
+                                // Consider this item passed if we have no placement filters on 
+                                // this brush or the padding ray didn't hit anything.
+                                if (brush.filters.Count == 0)
+                                {
+                                    continue;
+                                }
 
-                                    if (!passesFilter)
+                                // Retrieve pre-cached collider name variants.
+                                var (colliderName, colliderNameLower) = colliderNames.ContainsKey(col) ? colliderNames[col] : (null, null);
+
+                                // Test against each filter in the stack.
+                                for (int filterIndex = 0; filterIndex < brush.filters.Count; filterIndex++)
+                                {
+                                    // Consider it passed for null filters.
+                                    if (caseAdjustedFilterKeys[filterIndex] != null)
                                     {
-                                        // Bail out to catch any failed hits in 
-                                        // filter padding ring rays for this item.
-                                        anyFailed = true;
-                                        goto EndOfItemChunk;
+                                        var filter = brush.filters[filterIndex];
+                                        var passesFilter = false;
+
+                                        switch (filter.nameFilterMethod)
+                                        {
+                                            case ScatterFilter.NameFilterMethod.Contains:
+                                                passesFilter = filter.isCaseSensitive ? colliderName.Contains(caseAdjustedFilterKeys[filterIndex]) : colliderNameLower.Contains(caseAdjustedFilterKeys[filterIndex]);
+                                                break;
+                                            case ScatterFilter.NameFilterMethod.DoesNotContain:
+                                                passesFilter = filter.isCaseSensitive ? !colliderName.Contains(caseAdjustedFilterKeys[filterIndex]) : !colliderNameLower.Contains(caseAdjustedFilterKeys[filterIndex]);
+                                                break;
+                                            case ScatterFilter.NameFilterMethod.ExactMatch:
+                                                passesFilter = filter.isCaseSensitive ? colliderName.Equals(caseAdjustedFilterKeys[filterIndex]) : colliderNameLower.Equals(caseAdjustedFilterKeys[filterIndex]);
+                                                break;
+                                        }
+
+                                        if (!passesFilter)
+                                        {
+                                            // Bail out to catch any failed hits in 
+                                            // filter padding ring rays for this item.
+                                            anyFailed = true;
+                                            goto EndOfItemChunk;
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                    EndOfItemChunk:
+                        EndOfItemChunk:
 
-                        if (!anyFailed)
-                        {
-                            // append to the hitCount array position then iterate hitCount to shuffle the hits that
-                            // pass the filter into contiguous entries in the array ending at hitCount.
-                            // Store only the first hit in this chunk as that's the one in the center.
-                            filteredHits[hitCount] = filteredHits[indexAtItemChunkStart];
-                            hitCount++;
+                            if (!anyFailed)
+                            {
+                                // append to the hitCount array position then iterate hitCount to shuffle the hits that
+                                // pass the filter into contiguous entries in the array ending at hitCount.
+                                // Store only the first hit in this chunk as that's the one in the center.
+                                filteredHits[hitCount] = filteredHits[indexAtItemChunkStart];
+                                hitCount++;
+                            }
                         }
-                    }
-                });
+                    });
+                }
+                else
+                {
+                    hitCount = filteredHits.Length;
+                }
 
                 #endregion
 
